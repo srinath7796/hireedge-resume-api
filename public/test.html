@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>HireEdge – Test CV Generator</title></head>
+<body style="font-family:system-ui;max-width:760px;margin:40px auto;">
+  <h2>HireEdge – Test CV Generator</h2>
+  <form id="f">
+    <input name="fullName" placeholder="Full Name" required style="width:100%;padding:8px"><br><br>
+    <input name="targetTitle" placeholder="Target Role" style="width:100%;padding:8px"><br><br>
+    <input name="email" placeholder="Email" style="width:100%;padding:8px"><br><br>
+    <input name="phone" placeholder="Phone" style="width:100%;padding:8px"><br><br>
+    <input name="linkedin" placeholder="LinkedIn URL" style="width:100%;padding:8px"><br><br>
+    <input name="yearsExp" type="number" min="0" placeholder="Years of experience" style="width:100%;padding:8px"><br><br>
+    <input name="topSkills" placeholder="Top skills (comma separated)" style="width:100%;padding:8px"><br><br>
+    <textarea name="experienceText" rows="4" placeholder="- Achievement bullet 1&#10;- Achievement bullet 2" style="width:100%;padding:8px"></textarea><br><br>
+    <textarea name="jd" rows="6" placeholder="Paste Job Description" required style="width:100%;padding:8px"></textarea><br><br>
+    <button>Generate</button>
+  </form>
+  <p id="status" style="margin-top:12px"></p>
+  <script>
+    const API_URL = "/api/generate-resume";
+    document.getElementById('f').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const payload = {
+        jd: f.jd.value.trim(),
+        profile: {
+          fullName: f.fullName.value.trim(),
+          targetTitle: f.targetTitle.value.trim(),
+          email: f.email.value.trim(),
+          phone: f.phone.value.trim(),
+          linkedin: f.linkedin.value.trim(),
+          yearsExp: f.yearsExp.value.trim(),
+          topSkills: f.topSkills.value.trim(),
+          experienceText: f.experienceText.value.trim(),
+        }
+      };
+      const status = document.getElementById('status');
+      status.textContent = "Generating…";
+      try {
+        const resp = await fetch(API_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(()=>({}));
+          throw new Error(err.details || err.error || 'API error');
+        }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = "HireEdge_CV.docx"; a.click();
+        URL.revokeObjectURL(url);
+        status.textContent = "Done! File downloaded.";
+      } catch (err) {
+        status.textContent = "Error: " + err.message;
+        console.error(err);
+      }
+    });
+  </script>
+</body>
+</html>
