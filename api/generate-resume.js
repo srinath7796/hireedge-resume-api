@@ -1,6 +1,3 @@
-import { config } from 'dotenv';
-config();
-
 import OpenAI from "openai";
 import PizZip from "pizzip";
 import Docxtemplater from "docxtemplater";
