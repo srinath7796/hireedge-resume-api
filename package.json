@@ -1,0 +1,11 @@
+{
+  "name": "hireedge-resume-api",
+  "type": "module",
+  "version": "1.0.0",
+  "dependencies": {
+    "openai": "^4.56.0",
+    "docxtemplater": "^3.45.3",
+    "pizzip": "^3.1.7"
+  },
+  "engines": { "node": ">=18" }
+}
