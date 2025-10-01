@@ -1,5 +1,5 @@
 // api/generate-resume.js
-// Vercel Serverless Function (Node) — generates a tailored DOCX résumé
+// Vercel Serverless Function — generates a tailored DOCX résumé
 
 import OpenAI from "openai";
 import PizZip from "pizzip";
@@ -7,10 +7,31 @@ import Docxtemplater from "docxtemplater";
 import fs from "fs";
 import path from "path";
 
-// OpenAI client (reads OPENAI_API_KEY from Vercel env)
+// ---------------- CORS ----------------
+function applyCors(req, res) {
+  const origin = req.headers.origin || "";
+  // Add any storefront/admin origins you actually use:
+  const allowed = new Set([
+    "https://hireedge.co.uk",
+    "https://www.hireedge.co.uk",
+    "https://hireedge.myshopify.com"
+  ]);
+
+  if (origin && allowed.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  // If you want to test from anywhere temporarily, uncomment:
+  // res.setHeader("Access-Control-Allow-Origin", "*");
+
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "86400"); // cache preflight
+}
+
+// ---------------- OpenAI ----------------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ---------- Prompt ----------
 function buildPrompt({ jd, profile }) {
   return `
 You are an expert UK CV writer. Tailor the candidate’s CV to the job description.
@@ -32,58 +53,58 @@ ${JSON.stringify(profile, null, 2)}
 `;
 }
 
-// Tiny helper: retry once on transient 429s
+// retry once on transient 429s
 async function askOpenAI(prompt) {
+  const opts = {
+    model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: "You write ATS-optimised UK CVs using clear, concise language." },
+      { role: "user", content: prompt }
+    ],
+    temperature: 0.3
+  };
   try {
-    return await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: "You write ATS-optimised UK CVs using clear, concise language." },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.3
-    });
+    return await openai.chat.completions.create(opts);
   } catch (e) {
     if (e?.status === 429 || String(e).toLowerCase().includes("rate")) {
       await new Promise(r => setTimeout(r, 1200));
-      return await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: "You write ATS-optimised UK CVs using clear, concise language." },
-          { role: "user", content: prompt }
-        ],
-        temperature: 0.3
-      });
+      return await openai.chat.completions.create(opts);
     }
     throw e;
   }
 }
 
-// ---------- Handler ----------
+// ---------------- Handler ----------------
 export default async function handler(req, res) {
-  // CORS for your Shopify domain (okay for testing; App Proxy is cleaner later)
+  applyCors(req, res);
+
+  // CORS preflight
   if (req.method === "OPTIONS") {
-    res.setHeader("Access-Control-Allow-Origin", "https://hireedge.co.uk");
-    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     return res.status(200).end();
   }
-  res.setHeader("Access-Control-Allow-Origin", "https://hireedge.co.uk");
 
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Use POST" });
   }
 
   try {
-    const { jd, profile } = req.body || {};
+    // Body can be parsed already (Vercel) or be a raw string
+    let body = req.body;
+    if (typeof body === "string") {
+      try { body = JSON.parse(body); } catch { /* ignore */ }
+    }
+
+    const { jd, profile } = body || {};
     if (!jd || !profile?.fullName) {
       return res.status(400).json({ error: "Missing jd or profile.fullName" });
     }
 
+    // (Optional) trim overly long JDs to keep tokens in check
+    const trimmedJD = String(jd).slice(0, 12000);
+
     // 1) Get structured content from OpenAI
-    const prompt = buildPrompt({ jd, profile });
+    const prompt = buildPrompt({ jd: trimmedJD, profile });
     const completion = await askOpenAI(prompt);
 
     const raw = completion?.choices?.[0]?.message?.content || "{}";
@@ -145,8 +166,14 @@ export default async function handler(req, res) {
 
     // 4) Send file
     const role = (mapped.JOB_TITLE || "CV").replace(/[^a-z0-9]+/gi, "_");
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-    res.setHeader("Content-Disposition", `attachment; filename="HireEdge_${role}.docx"`);
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="HireEdge_${role}.docx"`
+    );
     return res.status(200).send(buf);
 
   } catch (err) {
