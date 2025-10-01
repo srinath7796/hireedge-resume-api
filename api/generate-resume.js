@@ -64,7 +64,7 @@ export default async function handler(req, res) {
     };
 
     // 3) Load template
-    const templatePath = path.join(process.cwd(), "templates", "uk_modern_cv_template.docx");
+    const templatePath = path.join(process.cwd(), "uk_modern_cv_template.docx");
     const content = fs.readFileSync(templatePath, "binary");
     const zip = new PizZip(content);
     const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
