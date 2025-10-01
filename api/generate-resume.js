@@ -1,13 +1,16 @@
+// api/generate-resume.js
+// Vercel Serverless Function (Node) — generates a tailored DOCX résumé
+
 import OpenAI from "openai";
 import PizZip from "pizzip";
 import Docxtemplater from "docxtemplater";
 import fs from "fs";
 import path from "path";
 
-// --- OpenAI client (reads OPENAI_API_KEY from Vercel env) ---
+// OpenAI client (reads OPENAI_API_KEY from Vercel env)
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ---- Prompt builder (strict JSON) ----
+// ---------- Prompt ----------
 function buildPrompt({ jd, profile }) {
   return `
 You are an expert UK CV writer. Tailor the candidate’s CV to the job description.
@@ -19,7 +22,7 @@ Return STRICT JSON with these keys ONLY:
   { "title": string, "company": string, "location": string, "start": string, "end": string, "bullets": array of 3-6 strings }
 - education: array of { "degree": string, "institution": string, "year": string }
 
-DO NOT include any commentary or extra keys.
+DO NOT include commentary or extra keys.
 
 JOB DESCRIPTION:
 ${jd}
@@ -29,7 +32,7 @@ ${JSON.stringify(profile, null, 2)}
 `;
 }
 
-// Optional: tiny helper to retry once on transient rate limits
+// Tiny helper: retry once on transient 429s
 async function askOpenAI(prompt) {
   try {
     return await openai.chat.completions.create({
@@ -58,9 +61,17 @@ async function askOpenAI(prompt) {
   }
 }
 
-// ---- Vercel serverless function handler ----
+// ---------- Handler ----------
 export default async function handler(req, res) {
-  // For quick manual checks in the browser
+  // CORS for your Shopify domain (okay for testing; App Proxy is cleaner later)
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Origin", "https://hireedge.co.uk");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    return res.status(200).end();
+  }
+  res.setHeader("Access-Control-Allow-Origin", "https://hireedge.co.uk");
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Use POST" });
   }
@@ -71,7 +82,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing jd or profile.fullName" });
     }
 
-    // 1) Get structured CV content from OpenAI
+    // 1) Get structured content from OpenAI
     const prompt = buildPrompt({ jd, profile });
     const completion = await askOpenAI(prompt);
 
@@ -80,16 +91,15 @@ export default async function handler(req, res) {
     try {
       data = JSON.parse(raw);
     } catch {
-      // If the model ever returns non-JSON by mistake
       return res.status(502).json({
         error: "Model output was not valid JSON",
-        details: raw?.slice(0, 300)
+        details: raw?.slice(0, 400)
       });
     }
 
-    // 2) Map JSON into template fields (SAFE)
-    const safeArr = (v) => Array.isArray(v) ? v : [];
-    const safeStr = (v) => (typeof v === "string" ? v : "");
+    // 2) Map JSON into template fields (safe)
+    const safeArr = v => (Array.isArray(v) ? v : []);
+    const safeStr = v => (typeof v === "string" ? v : "");
 
     const expBlocks = safeArr(data.experience_blocks).map(r => {
       const title = safeStr(r?.title);
@@ -121,7 +131,7 @@ export default async function handler(req, res) {
     };
 
     // 3) Load and fill the DOCX template
-    // If your template is inside /templates, change to:
+    // If your template is in /templates, change to:
     // const templatePath = path.join(process.cwd(), "templates", "uk_modern_cv_template.docx");
     const templatePath = path.join(process.cwd(), "uk_modern_cv_template.docx");
 
@@ -133,9 +143,10 @@ export default async function handler(req, res) {
     doc.render();
     const buf = doc.getZip().generate({ type: "nodebuffer" });
 
-    // 4) Send back the .docx file
+    // 4) Send file
+    const role = (mapped.JOB_TITLE || "CV").replace(/[^a-z0-9]+/gi, "_");
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-    res.setHeader("Content-Disposition", 'attachment; filename="HireEdge_CV.docx"');
+    res.setHeader("Content-Disposition", `attachment; filename="HireEdge_${role}.docx"`);
     return res.status(200).send(buf);
 
   } catch (err) {
@@ -143,14 +154,10 @@ export default async function handler(req, res) {
     console.error("ERROR:", msg);
 
     if (String(msg).includes("You exceeded your current quota")) {
-      return res.status(429).json({
-        error: "OpenAI quota exceeded. Please check billing/limits."
-      });
+      return res.status(429).json({ error: "OpenAI quota exceeded. Please check billing/limits." });
     }
     if (String(msg).includes("ENOENT")) {
-      return res.status(500).json({
-        error: "Template file not found. Check templatePath or file location."
-      });
+      return res.status(500).json({ error: "Template file not found. Check templatePath or file location." });
     }
     return res.status(500).json({ error: "Resume generation failed", details: msg });
   }
