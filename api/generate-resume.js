@@ -1,5 +1,4 @@
 // pages/api/generate-resume.js
-// npm i docx@9
 import {
   AlignmentType,
   Document,
@@ -8,22 +7,21 @@ import {
   TextRun,
 } from "docx";
 
-const S = v => (v ?? "").toString().trim();
+const S = (v) => (v ?? "").toString().trim();
 
 function normalize(body) {
   const jd = S(body.jd);
 
   const profile = {
-    fullName:   S(body?.profile?.fullName   || body?.fullName),
-    targetTitle:S(body?.profile?.targetTitle|| body?.targetTitle),
-    email:      S(body?.profile?.email      || body?.email),
-    phone:      S(body?.profile?.phone      || body?.phone),
-    linkedin:   S(body?.profile?.linkedin   || body?.linkedin),
-    yearsExp:   S(body?.profile?.yearsExp   || body?.yearsExp),
-    topSkills:  S(body?.profile?.topSkills  || body?.topSkills),
+    fullName:    S(body?.profile?.fullName    || body?.fullName),
+    targetTitle: S(body?.profile?.targetTitle || body?.targetTitle),
+    email:       S(body?.profile?.email       || body?.email),
+    phone:       S(body?.profile?.phone       || body?.phone),
+    linkedin:    S(body?.profile?.linkedin    || body?.linkedin),
+    yearsExp:    S(body?.profile?.yearsExp    || body?.yearsExp),
+    topSkills:   S(body?.profile?.topSkills   || body?.topSkills),
   };
 
-  // Accept any of these keys and shapes for experience
   let experiences =
     body?.experience ||
     body?.experiences ||
@@ -31,39 +29,41 @@ function normalize(body) {
     body?.profile?.experiences ||
     [];
   if (!Array.isArray(experiences)) experiences = [];
-
   experiences = experiences
-    .map(r => ({
-      title:   S(r?.title),
+    .map((r) => ({
+      title: S(r?.title),
       company: S(r?.company),
-      location:S(r?.location),
-      start:   S(r?.start),
-      end:     S(r?.end),
+      location: S(r?.location),
+      start: S(r?.start),
+      end: S(r?.end),
       bullets: Array.isArray(r?.bullets)
         ? r.bullets.map(S).filter(Boolean)
-        : S(r?.bullets).split("\n").map(s => s.trim()).filter(Boolean),
+        : S(r?.bullets).split("\n").map((t) => t.trim()).filter(Boolean),
     }))
-    .filter(r => r.title || r.company || (r.bullets && r.bullets.length));
+    .filter((r) => r.title || r.company || (r.bullets && r.bullets.length));
 
   let education = body?.education || body?.profile?.education || [];
   if (!Array.isArray(education)) education = [];
   education = education
-    .map(e => ({
-      degree:     S(e?.degree),
-      institution:S(e?.institution),
-      year:       S(e?.year),
+    .map((e) => ({
+      degree: S(e?.degree),
+      institution: S(e?.institution),
+      year: S(e?.year),
     }))
-    .filter(e => e.degree || e.institution || e.year);
+    .filter((e) => e.degree || e.institution || e.year);
 
   return { jd, profile, experiences, education };
 }
 
-const label = txt =>
-  new Paragraph({ spacing: { before: 200, after: 80 }, children: [new TextRun({ text: txt, bold: true })] });
+const label = (txt) =>
+  new Paragraph({
+    spacing: { before: 200, after: 80 },
+    children: [new TextRun({ text: txt, bold: true })],
+  });
 
-const para = txt => new Paragraph({ children: [new TextRun(txt)] });
+const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
 
-const bullet = txt => new Paragraph({ text: txt, bullet: { level: 0 } });
+const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
 
 export default async function handler(req, res) {
   try {
@@ -72,12 +72,13 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method Not Allowed" });
     }
 
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const body =
+      typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const { jd, profile, experiences, education } = normalize(body);
 
     const children = [];
 
-    // Header
+    // Name
     if (profile.fullName) {
       children.push(
         new Paragraph({
@@ -87,6 +88,7 @@ export default async function handler(req, res) {
         })
       );
     }
+    // Title
     if (profile.targetTitle) {
       children.push(
         new Paragraph({
@@ -96,6 +98,7 @@ export default async function handler(req, res) {
         })
       );
     }
+    // Contact
     const contact = [profile.email, profile.phone, profile.linkedin].filter(Boolean);
     if (contact.length) {
       children.push(
@@ -119,19 +122,28 @@ export default async function handler(req, res) {
     // Skills
     if (profile.topSkills) {
       children.push(label("KEY SKILLS"));
-      const skills = profile.topSkills.split(",").map(s => s.trim()).filter(Boolean);
+      const skills = profile.topSkills.split(",").map((s) => s.trim()).filter(Boolean);
       if (skills.length) children.push(para(skills.join(" • ")));
     }
 
-    // Experience (never blank)
+    // Experience
     children.push(label("PROFESSIONAL EXPERIENCE"));
     if (experiences.length) {
-      experiences.forEach(r => {
+      experiences.forEach((r) => {
         const head = [r.title, r.company].filter(Boolean).join(", ");
-        if (head) children.push(new Paragraph({ spacing: { before: 120, after: 40 }, children: [new TextRun({ text: head, bold: true })] }));
-        const sub = [r.location, [r.start, r.end].filter(Boolean).join(" – ")].filter(Boolean).join("  |  ");
+        if (head) {
+          children.push(
+            new Paragraph({
+              spacing: { before: 120, after: 40 },
+              children: [new TextRun({ text: head, bold: true })],
+            })
+          );
+        }
+        const sub = [r.location, [r.start, r.end].filter(Boolean).join(" – ")]
+          .filter(Boolean)
+          .join("  |  ");
         if (sub) children.push(para(sub));
-        (r.bullets || []).forEach(b => children.push(bullet(b)));
+        (r.bullets || []).forEach((b) => children.push(bullet(b)));
       });
     } else {
       children.push(para("Details available upon request."));
@@ -140,7 +152,7 @@ export default async function handler(req, res) {
     // Education
     if (education.length) {
       children.push(label("EDUCATION"));
-      education.forEach(e => {
+      education.forEach((e) => {
         const line = [e.degree, e.institution, e.year].filter(Boolean).join(", ");
         if (line) children.push(para(line));
       });
