@@ -1,12 +1,19 @@
 {
   "name": "hireedge-resume-api",
   "private": true,
-  "scripts": { "build": "next build", "start": "next start", "dev": "next dev" },
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
   "dependencies": {
     "docx": "^9.0.3",
-    "next": "14.x",
-    "react": "18.x",
-    "react-dom": "18.x"
+    "next": "14.2.3",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
   },
-  "engines": { "node": ">=18" }
+  "engines": {
+    "node": ">=18"
+  }
 }
