@@ -1,108 +1,69 @@
-// /pages/api/generate-resume.js  (Next 12/13 pages router)
-// If you're using the App Router, adapt to a route handler and return NextResponse.
-
+// pages/api/generate-resume.js
 // npm i docx@9
 import {
   AlignmentType,
   Document,
-  HeadingLevel,
   Packer,
   Paragraph,
-  TabStopPosition,
-  TabStopType,
   TextRun,
 } from "docx";
 
-function normStr(v) {
-  return (v ?? "").toString().trim();
-}
+const S = v => (v ?? "").toString().trim();
 
-function normalizePayload(body) {
-  // Core fields
-  const jd = normStr(body.jd);
+function normalize(body) {
+  const jd = S(body.jd);
 
-  // profile block
   const profile = {
-    fullName: normStr(body?.profile?.fullName || body?.fullName),
-    targetTitle: normStr(body?.profile?.targetTitle || body?.targetTitle),
-    email: normStr(body?.profile?.email || body?.email),
-    phone: normStr(body?.profile?.phone || body?.phone),
-    linkedin: normStr(body?.profile?.linkedin || body?.linkedin),
-    yearsExp: normStr(body?.profile?.yearsExp || body?.yearsExp),
-    topSkills: normStr(body?.profile?.topSkills || body?.topSkills),
+    fullName:   S(body?.profile?.fullName   || body?.fullName),
+    targetTitle:S(body?.profile?.targetTitle|| body?.targetTitle),
+    email:      S(body?.profile?.email      || body?.email),
+    phone:      S(body?.profile?.phone      || body?.phone),
+    linkedin:   S(body?.profile?.linkedin   || body?.linkedin),
+    yearsExp:   S(body?.profile?.yearsExp   || body?.yearsExp),
+    topSkills:  S(body?.profile?.topSkills  || body?.topSkills),
   };
 
-  // experience can arrive in multiple places/shapes
+  // Accept any of these keys and shapes for experience
   let experiences =
     body?.experience ||
     body?.experiences ||
     body?.work_experience ||
     body?.profile?.experiences ||
     [];
-
   if (!Array.isArray(experiences)) experiences = [];
 
   experiences = experiences
-    .map((r) => ({
-      title: normStr(r?.title),
-      company: normStr(r?.company),
-      location: normStr(r?.location),
-      start: normStr(r?.start),
-      end: normStr(r?.end),
+    .map(r => ({
+      title:   S(r?.title),
+      company: S(r?.company),
+      location:S(r?.location),
+      start:   S(r?.start),
+      end:     S(r?.end),
       bullets: Array.isArray(r?.bullets)
-        ? r.bullets.map((b) => normStr(b)).filter(Boolean)
-        : (normStr(r?.bullets) || "")
-            .split("\n")
-            .map((s) => s.trim())
-            .filter(Boolean),
+        ? r.bullets.map(S).filter(Boolean)
+        : S(r?.bullets).split("\n").map(s => s.trim()).filter(Boolean),
     }))
-    .filter(
-      (r) =>
-        r.title || r.company || (Array.isArray(r.bullets) && r.bullets.length)
-    );
+    .filter(r => r.title || r.company || (r.bullets && r.bullets.length));
 
-  // education
   let education = body?.education || body?.profile?.education || [];
   if (!Array.isArray(education)) education = [];
   education = education
-    .map((e) => ({
-      degree: normStr(e?.degree),
-      institution: normStr(e?.institution),
-      year: normStr(e?.year),
+    .map(e => ({
+      degree:     S(e?.degree),
+      institution:S(e?.institution),
+      year:       S(e?.year),
     }))
-    .filter((e) => e.degree || e.institution || e.year);
+    .filter(e => e.degree || e.institution || e.year);
 
   return { jd, profile, experiences, education };
 }
 
-function heading(text, size = 20) {
-  return new Paragraph({
-    heading: HeadingLevel.HEADING_2,
-    spacing: { before: 240, after: 120 },
-    children: [
-      new TextRun({ text, bold: true }),
-    ],
-  });
-}
+const label = txt =>
+  new Paragraph({ spacing: { before: 200, after: 80 }, children: [new TextRun({ text: txt, bold: true })] });
 
-function label(text) {
-  return new Paragraph({
-    spacing: { before: 200, after: 80 },
-    children: [new TextRun({ text, bold: true })],
-  });
-}
+const para = txt => new Paragraph({ children: [new TextRun(txt)] });
 
-function para(text) {
-  return new Paragraph({ children: [new TextRun(text)] });
-}
-
-function bullet(text) {
-  return new Paragraph({
-    text,
-    bullet: { level: 0 },
-    spacing: { after: 60 },
-  });
-}
+const bullet = txt => new Paragraph({ text: txt, bullet: { level: 0 } });
 
 export default async function handler(req, res) {
   try {
@@ -111,31 +72,21 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method Not Allowed" });
     }
 
-    const body =
-      typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
-    const { jd, profile, experiences, education } = normalizePayload(body);
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const { jd, profile, experiences, education } = normalize(body);
 
-    // Build the DOCX
     const children = [];
 
-    // Name (centered big)
+    // Header
     if (profile.fullName) {
       children.push(
         new Paragraph({
           alignment: AlignmentType.CENTER,
           spacing: { after: 80 },
-          children: [
-            new TextRun({
-              text: profile.fullName,
-              bold: true,
-              size: 40, // ~20pt
-            }),
-          ],
+          children: [new TextRun({ text: profile.fullName, bold: true, size: 40 })],
         })
       );
     }
-
-    // Title
     if (profile.targetTitle) {
       children.push(
         new Paragraph({
@@ -145,66 +96,42 @@ export default async function handler(req, res) {
         })
       );
     }
-
-    // Contact line with tab stops
-    const contactBits = [
-      profile.email,
-      profile.phone,
-      profile.linkedin,
-    ].filter(Boolean);
-    if (contactBits.length) {
+    const contact = [profile.email, profile.phone, profile.linkedin].filter(Boolean);
+    if (contact.length) {
       children.push(
         new Paragraph({
           alignment: AlignmentType.CENTER,
           spacing: { after: 240 },
-          children: [new TextRun(contactBits.join("  |  "))],
+          children: [new TextRun(contact.join("  |  "))],
         })
       );
     }
 
-    // Profile Summary (use JD + yearsExp to shape tone, but keep simple)
+    // Summary
     if (jd || profile.yearsExp || profile.topSkills) {
       children.push(label("PROFILE SUMMARY"));
       const summary = jd
-        ? `Experienced professional${profile.yearsExp ? ` with ${profile.yearsExp} years` : ""} targeting roles aligned with the job description provided.`
+        ? `Experienced professional${profile.yearsExp ? ` with ${profile.yearsExp} years` : ""} targeting roles aligned with the provided job description.`
         : `Experienced professional${profile.yearsExp ? ` with ${profile.yearsExp} years` : ""}.`;
       children.push(para(summary));
     }
 
-    // Key Skills
+    // Skills
     if (profile.topSkills) {
       children.push(label("KEY SKILLS"));
-      const skills =
-        profile.topSkills
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean) || [];
-      if (skills.length) {
-        // render as a single line separated by •
-        children.push(para(skills.join(" • ")));
-      }
+      const skills = profile.topSkills.split(",").map(s => s.trim()).filter(Boolean);
+      if (skills.length) children.push(para(skills.join(" • ")));
     }
 
-    // Professional Experience
+    // Experience (never blank)
     children.push(label("PROFESSIONAL EXPERIENCE"));
     if (experiences.length) {
-      experiences.forEach((r) => {
-        const line1 = [r.title, r.company].filter(Boolean).join(", ");
-        if (line1) {
-          children.push(
-            new Paragraph({
-              spacing: { before: 120, after: 40 },
-              children: [new TextRun({ text: line1, bold: true })],
-            })
-          );
-        }
-        const line2 = [r.location, [r.start, r.end].filter(Boolean).join(" – ")]
-          .filter(Boolean)
-          .join("  |  ");
-        if (line2) {
-          children.push(new Paragraph({ children: [new TextRun(line2)] }));
-        }
-        (r.bullets || []).forEach((b) => children.push(bullet(b)));
+      experiences.forEach(r => {
+        const head = [r.title, r.company].filter(Boolean).join(", ");
+        if (head) children.push(new Paragraph({ spacing: { before: 120, after: 40 }, children: [new TextRun({ text: head, bold: true })] }));
+        const sub = [r.location, [r.start, r.end].filter(Boolean).join(" – ")].filter(Boolean).join("  |  ");
+        if (sub) children.push(para(sub));
+        (r.bullets || []).forEach(b => children.push(bullet(b)));
       });
     } else {
       children.push(para("Details available upon request."));
@@ -213,10 +140,8 @@ export default async function handler(req, res) {
     // Education
     if (education.length) {
       children.push(label("EDUCATION"));
-      education.forEach((e) => {
-        const line = [e.degree, e.institution, e.year]
-          .filter(Boolean)
-          .join(", ");
+      education.forEach(e => {
+        const line = [e.degree, e.institution, e.year].filter(Boolean).join(", ");
         if (line) children.push(para(line));
       });
     }
@@ -224,34 +149,20 @@ export default async function handler(req, res) {
     const doc = new Document({
       sections: [
         {
-          properties: {
-            page: {
-              margin: { top: 720, bottom: 720, left: 900, right: 900 }, // ~0.5–0.7"
-            },
-          },
+          properties: { page: { margin: { top: 720, bottom: 720, left: 900, right: 900 } } },
           children,
         },
       ],
     });
 
     const buffer = await Packer.toBuffer(doc);
-    const safeRole =
-      (profile.targetTitle || "CV").replace(/[^a-z0-9]+/gi, "_") || "CV";
-    const filename = `HireEdge_${safeRole}.docx`;
+    const filename = `HireEdge_${(profile.targetTitle || "CV").replace(/[^a-z0-9]+/gi, "_")}.docx`;
 
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${encodeURIComponent(filename)}"`
-    );
-    res.setHeader(
-      "Content-Type",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    );
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
     res.status(200).send(Buffer.from(buffer));
   } catch (err) {
     console.error(err);
-    res
-      .status(400)
-      .json({ error: "Failed to generate resume", details: String(err?.message || err) });
+    res.status(400).json({ error: "Failed to generate resume", details: String(err?.message || err) });
   }
 }
