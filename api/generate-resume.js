@@ -1,215 +1,257 @@
-// api/generate-resume.js
-// Vercel Serverless Function (ESM). Generates a tailored DOCX CV from a template.
+// /pages/api/generate-resume.js  (Next 12/13 pages router)
+// If you're using the App Router, adapt to a route handler and return NextResponse.
 
-import OpenAI from "openai";
-import PizZip from "pizzip";
-import Docxtemplater from "docxtemplater";
-import fs from "fs";
-import path from "path";
+// npm i docx@9
+import {
+  AlignmentType,
+  Document,
+  HeadingLevel,
+  Packer,
+  Paragraph,
+  TabStopPosition,
+  TabStopType,
+  TextRun,
+} from "docx";
 
-// ----------------------
-// 0) CONFIG
-// ----------------------
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// CORS: add your domains here
-const ALLOWED_ORIGINS = new Set([
-  "https://hireedge.co.uk",
-  "https://www.hireedge.co.uk",
-  "https://197gtv-0q.myshopify.com",
-]);
-
-const TEMPLATE_CANDIDATES = [
-  path.join(process.cwd(), "uk_modern_cv_template.docx"),
-  path.join(process.cwd(), "templates", "uk_modern_cv_template.docx"),
-];
-
-const MODEL = "gpt-4o-mini";
-
-// ----------------------
-// Helpers
-// ----------------------
-function setCors(req, res) {
-  const origin = req.headers.origin || "";
-  if (ALLOWED_ORIGINS.has(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
-  }
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+function normStr(v) {
+  return (v ?? "").toString().trim();
 }
 
-function sanitizeFilenamePart(v) {
-  return (v || "CV").toString().trim().replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "");
-}
+function normalizePayload(body) {
+  // Core fields
+  const jd = normStr(body.jd);
 
-function pickTemplatePath() {
-  for (const p of TEMPLATE_CANDIDATES) {
-    try { fs.accessSync(p, fs.constants.R_OK); return p; } catch {}
-  }
-  return null;
-}
-
-function buildPrompt({ jd, profile }) {
-  const meta = {
-    fullName: profile.fullName,
-    targetTitle: profile.targetTitle,
-    email: profile.email,
-    phone: profile.phone,
-    linkedin: profile.linkedin,
-    yearsExp: profile.yearsExp,
-    topSkills: profile.topSkills,
+  // profile block
+  const profile = {
+    fullName: normStr(body?.profile?.fullName || body?.fullName),
+    targetTitle: normStr(body?.profile?.targetTitle || body?.targetTitle),
+    email: normStr(body?.profile?.email || body?.email),
+    phone: normStr(body?.profile?.phone || body?.phone),
+    linkedin: normStr(body?.profile?.linkedin || body?.linkedin),
+    yearsExp: normStr(body?.profile?.yearsExp || body?.yearsExp),
+    topSkills: normStr(body?.profile?.topSkills || body?.topSkills),
   };
 
-  return `
-You are an expert UK CV writer. Use the candidate’s supplied roles and education as the primary source. Improve clarity, quantify impact, and align to the job description. Do not invent employers, dates or degrees. Use UK tone/spelling.
+  // experience can arrive in multiple places/shapes
+  let experiences =
+    body?.experience ||
+    body?.experiences ||
+    body?.work_experience ||
+    body?.profile?.experiences ||
+    [];
 
-Return STRICT JSON with these keys ONLY:
-- summary: string (3–4 lines, UK tone)
-- skills: array of 8–12 ATS keywords taken from the JD
-- experience_blocks: array of roles, each object EXACTLY with keys:
-  { "title": string, "company": string, "location": string, "start": string, "end": string, "bullets": array of 3-6 strings }
-- education: array of { "degree": string, "institution": string, "year": string }
+  if (!Array.isArray(experiences)) experiences = [];
 
-JOB DESCRIPTION:
-${jd}
+  experiences = experiences
+    .map((r) => ({
+      title: normStr(r?.title),
+      company: normStr(r?.company),
+      location: normStr(r?.location),
+      start: normStr(r?.start),
+      end: normStr(r?.end),
+      bullets: Array.isArray(r?.bullets)
+        ? r.bullets.map((b) => normStr(b)).filter(Boolean)
+        : (normStr(r?.bullets) || "")
+            .split("\n")
+            .map((s) => s.trim())
+            .filter(Boolean),
+    }))
+    .filter(
+      (r) =>
+        r.title || r.company || (Array.isArray(r.bullets) && r.bullets.length)
+    );
 
-CANDIDATE META:
-${JSON.stringify(meta, null, 2)}
+  // education
+  let education = body?.education || body?.profile?.education || [];
+  if (!Array.isArray(education)) education = [];
+  education = education
+    .map((e) => ({
+      degree: normStr(e?.degree),
+      institution: normStr(e?.institution),
+      year: normStr(e?.year),
+    }))
+    .filter((e) => e.degree || e.institution || e.year);
 
-CANDIDATE PREVIOUS ROLES (rewrite these bullets but stay truthful):
-${JSON.stringify(profile.previousRoles || [], null, 2)}
-
-CANDIDATE EDUCATION (prefer these entries as ground-truth):
-${JSON.stringify(profile.education || [], null, 2)}
-`;
+  return { jd, profile, experiences, education };
 }
 
-async function askOpenAI(prompt) {
+function heading(text, size = 20) {
+  return new Paragraph({
+    heading: HeadingLevel.HEADING_2,
+    spacing: { before: 240, after: 120 },
+    children: [
+      new TextRun({ text, bold: true }),
+    ],
+  });
+}
+
+function label(text) {
+  return new Paragraph({
+    spacing: { before: 200, after: 80 },
+    children: [new TextRun({ text, bold: true })],
+  });
+}
+
+function para(text) {
+  return new Paragraph({ children: [new TextRun(text)] });
+}
+
+function bullet(text) {
+  return new Paragraph({
+    text,
+    bullet: { level: 0 },
+    spacing: { after: 60 },
+  });
+}
+
+export default async function handler(req, res) {
   try {
-    return await openai.chat.completions.create({
-      model: MODEL,
-      response_format: { type: "json_object" },
-      temperature: 0.3,
-      messages: [
-        { role: "system", content: "You write ATS-optimised UK CVs. Output must be valid JSON exactly as specified." },
-        { role: "user", content: prompt },
-      ],
-    });
-  } catch (e) {
-    const msg = e?.message || String(e);
-    if (e?.status === 429 || /rate/i.test(msg)) {
-      await new Promise(r => setTimeout(r, 1200));
-      return await openai.chat.completions.create({
-        model: MODEL,
-        response_format: { type: "json_object" },
-        temperature: 0.3,
-        messages: [
-          { role: "system", content: "You write ATS-optimised UK CVs. Output must be valid JSON exactly as specified." },
-          { role: "user", content: prompt },
-        ],
+    if (req.method !== "POST") {
+      res.setHeader("Allow", "POST");
+      return res.status(405).json({ error: "Method Not Allowed" });
+    }
+
+    const body =
+      typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+    const { jd, profile, experiences, education } = normalizePayload(body);
+
+    // Build the DOCX
+    const children = [];
+
+    // Name (centered big)
+    if (profile.fullName) {
+      children.push(
+        new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { after: 80 },
+          children: [
+            new TextRun({
+              text: profile.fullName,
+              bold: true,
+              size: 40, // ~20pt
+            }),
+          ],
+        })
+      );
+    }
+
+    // Title
+    if (profile.targetTitle) {
+      children.push(
+        new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { after: 60 },
+          children: [new TextRun({ text: profile.targetTitle, italics: true })],
+        })
+      );
+    }
+
+    // Contact line with tab stops
+    const contactBits = [
+      profile.email,
+      profile.phone,
+      profile.linkedin,
+    ].filter(Boolean);
+    if (contactBits.length) {
+      children.push(
+        new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { after: 240 },
+          children: [new TextRun(contactBits.join("  |  "))],
+        })
+      );
+    }
+
+    // Profile Summary (use JD + yearsExp to shape tone, but keep simple)
+    if (jd || profile.yearsExp || profile.topSkills) {
+      children.push(label("PROFILE SUMMARY"));
+      const summary = jd
+        ? `Experienced professional${profile.yearsExp ? ` with ${profile.yearsExp} years` : ""} targeting roles aligned with the job description provided.`
+        : `Experienced professional${profile.yearsExp ? ` with ${profile.yearsExp} years` : ""}.`;
+      children.push(para(summary));
+    }
+
+    // Key Skills
+    if (profile.topSkills) {
+      children.push(label("KEY SKILLS"));
+      const skills =
+        profile.topSkills
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean) || [];
+      if (skills.length) {
+        // render as a single line separated by •
+        children.push(para(skills.join(" • ")));
+      }
+    }
+
+    // Professional Experience
+    children.push(label("PROFESSIONAL EXPERIENCE"));
+    if (experiences.length) {
+      experiences.forEach((r) => {
+        const line1 = [r.title, r.company].filter(Boolean).join(", ");
+        if (line1) {
+          children.push(
+            new Paragraph({
+              spacing: { before: 120, after: 40 },
+              children: [new TextRun({ text: line1, bold: true })],
+            })
+          );
+        }
+        const line2 = [r.location, [r.start, r.end].filter(Boolean).join(" – ")]
+          .filter(Boolean)
+          .join("  |  ");
+        if (line2) {
+          children.push(new Paragraph({ children: [new TextRun(line2)] }));
+        }
+        (r.bullets || []).forEach((b) => children.push(bullet(b)));
+      });
+    } else {
+      children.push(para("Details available upon request."));
+    }
+
+    // Education
+    if (education.length) {
+      children.push(label("EDUCATION"));
+      education.forEach((e) => {
+        const line = [e.degree, e.institution, e.year]
+          .filter(Boolean)
+          .join(", ");
+        if (line) children.push(para(line));
       });
     }
-    throw e;
-  }
-}
 
-const arr = v => (Array.isArray(v) ? v : []);
-const str = v => (typeof v === "string" ? v : "");
-
-// ----------------------
-// Handler
-// ----------------------
-export default async function handler(req, res) {
-  setCors(req, res);
-
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Use POST" });
-
-  try {
-    let body = req.body;
-    if (typeof body === "string") {
-      try { body = JSON.parse(body); } catch { return res.status(400).json({ error: "Invalid JSON body" }); }
-    }
-
-    const { jd, profile } = body || {};
-    if (!jd || !profile?.fullName) return res.status(400).json({ error: "Missing jd or profile.fullName" });
-
-    // 1) Model
-    const prompt = buildPrompt({ jd, profile });
-    const completion = await askOpenAI(prompt);
-    const raw = completion?.choices?.[0]?.message?.content || "{}";
-
-    let data;
-    try { data = JSON.parse(raw); }
-    catch { return res.status(502).json({ error: "Model output was not valid JSON", details: raw?.slice(0, 500) }); }
-
-    // 2) Prefer user-provided education if present
-    const suppliedEdu = arr(profile.education).filter(
-      e => str(e.degree) || str(e.institution) || str(e.year)
-    );
-    const finalEducation = suppliedEdu.length ? suppliedEdu : arr(data.education);
-
-    // 3) Map to placeholders
-    const expBlocks = arr(data.experience_blocks).map(r => {
-      const title = str(r?.title);
-      const company = str(r?.company);
-      const location = str(r?.location);
-      const start = str(r?.start);
-      const end = str(r?.end);
-      const bullets = arr(r?.bullets);
-      const bulletsText = bullets.length ? `\n- ${bullets.join("\n- ")}` : "";
-      const header = [title, "—", company, location ? `, ${location}` : ""].filter(Boolean).join(" ");
-      const dates = (start || end) ? ` (${start || "Start"}–${end || "Present"})` : "";
-      return `\n${header}${dates}${bulletsText}`;
+    const doc = new Document({
+      sections: [
+        {
+          properties: {
+            page: {
+              margin: { top: 720, bottom: 720, left: 900, right: 900 }, // ~0.5–0.7"
+            },
+          },
+          children,
+        },
+      ],
     });
 
-    const mapped = {
-      FULL_NAME: str(profile.fullName),
-      JOB_TITLE: str(profile.targetTitle),
-      EMAIL: str(profile.email),
-      PHONE: str(profile.phone),
-      LINKEDIN: str(profile.linkedin),
-      SUMMARY: str(data.summary),
-      SKILLS: arr(data.skills).join(" • "),
-      EXPERIENCE_BLOCKS: expBlocks.join("\n\n"),
-      EDUCATION: arr(finalEducation)
-        .map(e => `${str(e.degree)}, ${str(e.institution)} (${str(e.year)})`)
-        .join("\n"),
-    };
+    const buffer = await Packer.toBuffer(doc);
+    const safeRole =
+      (profile.targetTitle || "CV").replace(/[^a-z0-9]+/gi, "_") || "CV";
+    const filename = `HireEdge_${safeRole}.docx`;
 
-    // 4) Template
-    const templatePath = pickTemplatePath();
-    if (!templatePath) return res.status(500).json({ error: "Template file not found in project." });
-
-    const content = fs.readFileSync(templatePath, "binary");
-    const zip = new PizZip(content);
-    const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
-
-    doc.setData(mapped);
-    try { doc.render(); }
-    catch (e) { return res.status(500).json({ error: "Template rendering failed", details: e?.message || String(e) }); }
-
-    const buf = doc.getZip().generate({ type: "nodebuffer" });
-
-    const role = sanitizeFilenamePart(mapped.JOB_TITLE || "CV");
-    const filename = `HireEdge_${role}.docx`;
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-    res.setHeader("Content-Disposition",
-      `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(filename)}"`
     );
-    return res.status(200).send(buf);
-
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    res.status(200).send(Buffer.from(buffer));
   } catch (err) {
-    const msg = err?.response?.data || err?.message || String(err);
-    console.error("ERROR:", msg);
-
-    if (String(msg).includes("You exceeded your current quota"))
-      return res.status(429).json({ error: "OpenAI quota exceeded. Please check billing/limits." });
-
-    if (String(msg).includes("ENOENT"))
-      return res.status(500).json({ error: "Template file not found. Check template path." });
-
-    return res.status(500).json({ error: "Resume generation failed", details: msg });
+    console.error(err);
+    res
+      .status(400)
+      .json({ error: "Failed to generate resume", details: String(err?.message || err) });
   }
 }
