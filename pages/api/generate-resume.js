@@ -8,13 +8,11 @@ import {
   TextRun,
 } from "docx";
 
-// ✅ Allow only your Shopify domain
 const ALLOWED_ORIGIN = "https://hireedge.co.uk";
 
-// ✅ Safe string helper
+// small helper
 const S = (v) => (v ?? "").toString().trim();
 
-// ✅ Normalize incoming JSON body
 function normalize(body) {
   const jd = S(body.jd);
 
@@ -64,7 +62,6 @@ function normalize(body) {
   return { jd, profile, experiences, education };
 }
 
-// ✅ Simple paragraph helpers
 const label = (txt) =>
   new Paragraph({
     spacing: { before: 200, after: 80 },
@@ -72,52 +69,61 @@ const label = (txt) =>
   });
 
 const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
-const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
+
+const bullet = (txt) =>
+  new Paragraph({
+    text: txt,
+    bullet: { level: 0 },
+  });
 
 export default async function handler(req, res) {
   try {
-    // ✅ Enable CORS
+    // CORS
     res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-    // ✅ Preflight (for browser)
+    // preflight
     if (req.method === "OPTIONS") return res.status(200).end();
 
-    // ✅ Health check
+    // quick browser test
     if (req.method === "GET") {
       return res.status(200).json({
         ok: true,
-        message: "HireEdge Resume API is alive ✅ Send POST to generate a CV.",
+        message: "HireEdge Resume API is alive ✅ send POST to get DOCX",
       });
     }
 
-    // ✅ Only allow POST
     if (req.method !== "POST") {
       res.setHeader("Allow", "GET, POST, OPTIONS");
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    // ✅ Parse JSON safely
+    // parse body
     const body =
       typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const { jd, profile, experiences, education } = normalize(body);
 
-    // ✅ Start building DOCX
+    // build document
     const children = [];
 
-    // Name
+    // header
     if (profile.fullName) {
       children.push(
         new Paragraph({
           alignment: AlignmentType.CENTER,
           spacing: { after: 80 },
-          children: [new TextRun({ text: profile.fullName, bold: true, size: 40 })],
+          children: [
+            new TextRun({
+              text: profile.fullName,
+              bold: true,
+              size: 40,
+            }),
+          ],
         })
       );
     }
 
-    // Target Title
     if (profile.targetTitle) {
       children.push(
         new Paragraph({
@@ -128,8 +134,9 @@ export default async function handler(req, res) {
       );
     }
 
-    // Contact Info
-    const contact = [profile.email, profile.phone, profile.linkedin].filter(Boolean);
+    const contact = [profile.email, profile.phone, profile.linkedin].filter(
+      Boolean
+    );
     if (contact.length) {
       children.push(
         new Paragraph({
@@ -140,16 +147,20 @@ export default async function handler(req, res) {
       );
     }
 
-    // Summary Section
+    // summary
     if (jd || profile.yearsExp || profile.topSkills) {
       children.push(label("PROFILE SUMMARY"));
       const summary = jd
-        ? `Experienced professional${profile.yearsExp ? ` with ${profile.yearsExp} years` : ""} targeting roles aligned with the provided job description.`
-        : `Experienced professional${profile.yearsExp ? ` with ${profile.yearsExp} years` : ""}.`;
+        ? `Experienced professional${
+            profile.yearsExp ? ` with ${profile.yearsExp} years` : ""
+          } targeting roles aligned with the provided job description.`
+        : `Experienced professional${
+            profile.yearsExp ? ` with ${profile.yearsExp} years` : ""
+          }.`;
       children.push(para(summary));
     }
 
-    // Skills
+    // skills
     if (profile.topSkills) {
       children.push(label("KEY SKILLS"));
       const skills = profile.topSkills
@@ -159,7 +170,7 @@ export default async function handler(req, res) {
       if (skills.length) children.push(para(skills.join(" • ")));
     }
 
-    // Experience Section
+    // experience
     children.push(label("PROFESSIONAL EXPERIENCE"));
     if (experiences.length) {
       experiences.forEach((r) => {
@@ -182,7 +193,7 @@ export default async function handler(req, res) {
       children.push(para("Details available upon request."));
     }
 
-    // Education
+    // education
     if (education.length) {
       children.push(label("EDUCATION"));
       education.forEach((e) => {
@@ -193,26 +204,26 @@ export default async function handler(req, res) {
       });
     }
 
-    // ✅ Build final document
+    // build docx
     const doc = new Document({
       sections: [
         {
           properties: {
-            page: { margin: { top: 720, bottom: 720, left: 900, right: 900 } },
+            page: {
+              margin: { top: 720, bottom: 720, left: 900, right: 900 },
+            },
           },
           children,
         },
       ],
     });
 
-    // ✅ Convert to buffer
     const buffer = await Packer.toBuffer(doc);
     const filename = `HireEdge_${(profile.targetTitle || "CV").replace(
       /[^a-z0-9]+/gi,
       "_"
     )}.docx`;
 
-    // ✅ Send DOCX response
     res.setHeader(
       "Content-Disposition",
       `attachment; filename="${encodeURIComponent(filename)}"`
@@ -230,4 +241,3 @@ export default async function handler(req, res) {
     });
   }
 }
-
