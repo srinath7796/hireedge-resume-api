@@ -7,7 +7,7 @@ import {
   TextRun,
 } from "docx";
 
-const ALLOWED_ORIGIN = "https://hireedge.co.uk"; // your Shopify domain
+const ALLOWED_ORIGIN = "*";
 const S = (v) => (v ?? "").toString().trim();
 
 function normalize(body) {
