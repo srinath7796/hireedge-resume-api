@@ -6,13 +6,13 @@ import {
   TextRun,
 } from "docx";
 
-// ✅ allow only your Shopify domain
+// your Shopify domain
 const ALLOWED_ORIGIN = "https://hireedge.co.uk";
 
 // helper to safely trim values
 const S = (v) => (v ?? "").toString().trim();
 
-// normalize incoming body
+// normalize incoming body (same as yours)
 function normalize(body) {
   const jd = S(body.jd);
 
@@ -62,46 +62,74 @@ function normalize(body) {
   return { jd, profile, experiences, education };
 }
 
-// simple helper paragraphs
-const label = (txt) =>
-  new Paragraph({
-    spacing: { before: 200, after: 80 },
-    children: [new TextRun({ text: txt, bold: true })],
-  });
-
-const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
-const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
-
 export default async function handler(req, res) {
+  // 1) CORS
+  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  // 2) preflight
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  // 3) GET = quick health check
+  if (req.method === "GET") {
+    return res.status(200).json({
+      ok: true,
+      message:
+        "HireEdge resume API is alive. Send POST with candidate data to get a DOCX.",
+    });
+  }
+
+  // 4) only POST after this
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "GET, POST, OPTIONS");
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  // 5) parse body safely
+  let body;
   try {
-    // ✅ CORS setup
-    res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+  } catch (err) {
+    return res.status(400).json({
+      error: "Invalid JSON body",
+      details: String(err?.message || err),
+    });
+  }
 
-    // preflight
-    if (req.method === "OPTIONS") return res.status(200).end();
+  const { jd, profile, experiences, education } = normalize(body);
 
-    // browser GET test
-    if (req.method === "GET") {
-      return res.status(200).json({
-        ok: true,
-        message: "HireEdge Resume API is alive ✅ Send POST with JSON to generate a CV.",
-      });
-    }
+  // 6) NOW load docx inside try — so bad import won’t crash the whole function
+  let AlignmentType, Document, Packer, Paragraph, TextRun;
+  try {
+    const docx = await import("docx");
+    AlignmentType = docx.AlignmentType;
+    Document = docx.Document;
+    Packer = docx.Packer;
+    Paragraph = docx.Paragraph;
+    TextRun = docx.TextRun;
+  } catch (err) {
+    console.error("Failed to import docx on Vercel:", err);
+    return res.status(500).json({
+      error: "docx library could not be loaded on the server",
+      details: String(err?.message || err),
+    });
+  }
 
-    // only allow POST
-    if (req.method !== "POST") {
-      res.setHeader("Allow", "GET, POST, OPTIONS");
-      return res.status(405).json({ error: "Method not allowed" });
-    }
+  // 7) helper paragraph builders (now that we have docx)
+  const label = (txt) =>
+    new Paragraph({
+      spacing: { before: 200, after: 80 },
+      children: [new TextRun({ text: txt, bold: true })],
+    });
 
-    // parse body safely
-    const body =
-      typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
-    const { jd, profile, experiences, education } = normalize(body);
+  const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
+  const bullet = (txt) =>
+    new Paragraph({ text: txt, bullet: { level: 0 } });
 
-    // start building docx
+  try {
     const children = [];
 
     // Name
@@ -209,7 +237,6 @@ export default async function handler(req, res) {
       "_"
     )}.docx`;
 
-    // send docx
     res.setHeader(
       "Content-Disposition",
       `attachment; filename="${encodeURIComponent(filename)}"`
@@ -218,10 +245,10 @@ export default async function handler(req, res) {
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     );
-    res.status(200).send(Buffer.from(buffer));
+    return res.status(200).send(Buffer.from(buffer));
   } catch (err) {
     console.error("❌ Resume generation failed:", err);
-    res.status(500).json({
+    return res.status(500).json({
       error: "Resume generation failed",
       details: String(err?.message || err),
     });
