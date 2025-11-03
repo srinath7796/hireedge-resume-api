@@ -1,1 +1,233 @@
+// pages/api/generate-resume.js
+
+import {
+  AlignmentType,
+  Document,
+  Packer,
+  Paragraph,
+  TextRun,
+} from "docx";
+
+// ✅ Allow only your Shopify domain
+const ALLOWED_ORIGIN = "https://hireedge.co.uk";
+
+// ✅ Safe string helper
+const S = (v) => (v ?? "").toString().trim();
+
+// ✅ Normalize incoming JSON body
+function normalize(body) {
+  const jd = S(body.jd);
+
+  const profile = {
+    fullName: S(body?.profile?.fullName || body?.fullName),
+    targetTitle: S(body?.profile?.targetTitle || body?.targetTitle),
+    email: S(body?.profile?.email || body?.email),
+    phone: S(body?.profile?.phone || body?.phone),
+    linkedin: S(body?.profile?.linkedin || body?.linkedin),
+    yearsExp: S(body?.profile?.yearsExp || body?.yearsExp),
+    topSkills: S(body?.profile?.topSkills || body?.topSkills),
+  };
+
+  let experiences =
+    body?.experience ||
+    body?.experiences ||
+    body?.work_experience ||
+    body?.profile?.experiences ||
+    [];
+  if (!Array.isArray(experiences)) experiences = [];
+  experiences = experiences
+    .map((r) => ({
+      title: S(r?.title),
+      company: S(r?.company),
+      location: S(r?.location),
+      start: S(r?.start),
+      end: S(r?.end),
+      bullets: Array.isArray(r?.bullets)
+        ? r.bullets.map(S).filter(Boolean)
+        : S(r?.bullets)
+            .split("\n")
+            .map((t) => t.trim())
+            .filter(Boolean),
+    }))
+    .filter((r) => r.title || r.company || (r.bullets && r.bullets.length));
+
+  let education = body?.education || body?.profile?.education || [];
+  if (!Array.isArray(education)) education = [];
+  education = education
+    .map((e) => ({
+      degree: S(e?.degree),
+      institution: S(e?.institution),
+      year: S(e?.year),
+    }))
+    .filter((e) => e.degree || e.institution || e.year);
+
+  return { jd, profile, experiences, education };
+}
+
+// ✅ Simple paragraph helpers
+const label = (txt) =>
+  new Paragraph({
+    spacing: { before: 200, after: 80 },
+    children: [new TextRun({ text: txt, bold: true })],
+  });
+
+const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
+const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
+
+export default async function handler(req, res) {
+  try {
+    // ✅ Enable CORS
+    res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+    // ✅ Preflight (for browser)
+    if (req.method === "OPTIONS") return res.status(200).end();
+
+    // ✅ Health check
+    if (req.method === "GET") {
+      return res.status(200).json({
+        ok: true,
+        message: "HireEdge Resume API is alive ✅ Send POST to generate a CV.",
+      });
+    }
+
+    // ✅ Only allow POST
+    if (req.method !== "POST") {
+      res.setHeader("Allow", "GET, POST, OPTIONS");
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    // ✅ Parse JSON safely
+    const body =
+      typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const { jd, profile, experiences, education } = normalize(body);
+
+    // ✅ Start building DOCX
+    const children = [];
+
+    // Name
+    if (profile.fullName) {
+      children.push(
+        new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { after: 80 },
+          children: [new TextRun({ text: profile.fullName, bold: true, size: 40 })],
+        })
+      );
+    }
+
+    // Target Title
+    if (profile.targetTitle) {
+      children.push(
+        new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { after: 60 },
+          children: [new TextRun({ text: profile.targetTitle, italics: true })],
+        })
+      );
+    }
+
+    // Contact Info
+    const contact = [profile.email, profile.phone, profile.linkedin].filter(Boolean);
+    if (contact.length) {
+      children.push(
+        new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { after: 240 },
+          children: [new TextRun(contact.join("  |  "))],
+        })
+      );
+    }
+
+    // Summary Section
+    if (jd || profile.yearsExp || profile.topSkills) {
+      children.push(label("PROFILE SUMMARY"));
+      const summary = jd
+        ? `Experienced professional${profile.yearsExp ? ` with ${profile.yearsExp} years` : ""} targeting roles aligned with the provided job description.`
+        : `Experienced professional${profile.yearsExp ? ` with ${profile.yearsExp} years` : ""}.`;
+      children.push(para(summary));
+    }
+
+    // Skills
+    if (profile.topSkills) {
+      children.push(label("KEY SKILLS"));
+      const skills = profile.topSkills
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (skills.length) children.push(para(skills.join(" • ")));
+    }
+
+    // Experience Section
+    children.push(label("PROFESSIONAL EXPERIENCE"));
+    if (experiences.length) {
+      experiences.forEach((r) => {
+        const head = [r.title, r.company].filter(Boolean).join(", ");
+        if (head) {
+          children.push(
+            new Paragraph({
+              spacing: { before: 120, after: 40 },
+              children: [new TextRun({ text: head, bold: true })],
+            })
+          );
+        }
+        const sub = [r.location, [r.start, r.end].filter(Boolean).join(" – ")]
+          .filter(Boolean)
+          .join("  |  ");
+        if (sub) children.push(para(sub));
+        (r.bullets || []).forEach((b) => children.push(bullet(b)));
+      });
+    } else {
+      children.push(para("Details available upon request."));
+    }
+
+    // Education
+    if (education.length) {
+      children.push(label("EDUCATION"));
+      education.forEach((e) => {
+        const line = [e.degree, e.institution, e.year]
+          .filter(Boolean)
+          .join(", ");
+        if (line) children.push(para(line));
+      });
+    }
+
+    // ✅ Build final document
+    const doc = new Document({
+      sections: [
+        {
+          properties: {
+            page: { margin: { top: 720, bottom: 720, left: 900, right: 900 } },
+          },
+          children,
+        },
+      ],
+    });
+
+    // ✅ Convert to buffer
+    const buffer = await Packer.toBuffer(doc);
+    const filename = `HireEdge_${(profile.targetTitle || "CV").replace(
+      /[^a-z0-9]+/gi,
+      "_"
+    )}.docx`;
+
+    // ✅ Send DOCX response
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(filename)}"`
+    );
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    res.status(200).send(Buffer.from(buffer));
+  } catch (err) {
+    console.error("❌ Resume generation failed:", err);
+    res.status(500).json({
+      error: "Resume generation failed",
+      details: String(err?.message || err),
+    });
+  }
+}
 
