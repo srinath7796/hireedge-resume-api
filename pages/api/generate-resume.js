@@ -6,13 +6,13 @@ import {
   TextRun,
 } from "docx";
 
-// your Shopify domain
+// allow your Shopify domain
 const ALLOWED_ORIGIN = "https://hireedge.co.uk";
 
 // helper to safely trim values
 const S = (v) => (v ?? "").toString().trim();
 
-// normalize incoming body (same as yours)
+// normalize incoming body
 function normalize(body) {
   const jd = S(body.jd);
 
@@ -73,12 +73,11 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  // 3) GET = quick health check
+  // 3) quick health check
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
-      message:
-        "HireEdge resume API is alive. Send POST with candidate data to get a DOCX.",
+      message: "HireEdge resume API is alive. Send POST to get DOCX.",
     });
   }
 
@@ -88,7 +87,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // 5) parse body safely
+  // 5) parse body
   let body;
   try {
     body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
@@ -101,7 +100,7 @@ export default async function handler(req, res) {
 
   const { jd, profile, experiences, education } = normalize(body);
 
-  // 6) NOW load docx inside try — so bad import won’t crash the whole function
+  // 6) 👉 dynamic import of docx (this is the fix)
   let AlignmentType, Document, Packer, Paragraph, TextRun;
   try {
     const docx = await import("docx");
@@ -111,28 +110,28 @@ export default async function handler(req, res) {
     Paragraph = docx.Paragraph;
     TextRun = docx.TextRun;
   } catch (err) {
-    console.error("Failed to import docx on Vercel:", err);
+    // if Vercel can't find docx, return a JSON error, not a 500 white page
+    console.error("Could not load docx:", err);
     return res.status(500).json({
-      error: "docx library could not be loaded on the server",
+      error:
+        "Server could not load the 'docx' module. Make sure 'docx' is in package.json dependencies.",
       details: String(err?.message || err),
     });
   }
 
-  // 7) helper paragraph builders (now that we have docx)
+  // helper creators (now that docx is loaded)
   const label = (txt) =>
     new Paragraph({
       spacing: { before: 200, after: 80 },
       children: [new TextRun({ text: txt, bold: true })],
     });
-
   const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
-  const bullet = (txt) =>
-    new Paragraph({ text: txt, bullet: { level: 0 } });
+  const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
 
   try {
     const children = [];
 
-    // Name
+    // header
     if (profile.fullName) {
       children.push(
         new Paragraph({
@@ -143,7 +142,6 @@ export default async function handler(req, res) {
       );
     }
 
-    // Title
     if (profile.targetTitle) {
       children.push(
         new Paragraph({
@@ -154,7 +152,6 @@ export default async function handler(req, res) {
       );
     }
 
-    // Contact
     const contact = [profile.email, profile.phone, profile.linkedin].filter(Boolean);
     if (contact.length) {
       children.push(
@@ -166,7 +163,7 @@ export default async function handler(req, res) {
       );
     }
 
-    // Summary
+    // summary
     if (jd || profile.yearsExp || profile.topSkills) {
       children.push(label("PROFILE SUMMARY"));
       const summary = jd
@@ -175,7 +172,7 @@ export default async function handler(req, res) {
       children.push(para(summary));
     }
 
-    // Skills
+    // skills
     if (profile.topSkills) {
       children.push(label("KEY SKILLS"));
       const skills = profile.topSkills
@@ -185,7 +182,7 @@ export default async function handler(req, res) {
       if (skills.length) children.push(para(skills.join(" • ")));
     }
 
-    // Experience
+    // experience
     children.push(label("PROFESSIONAL EXPERIENCE"));
     if (experiences.length) {
       experiences.forEach((r) => {
@@ -208,7 +205,7 @@ export default async function handler(req, res) {
       children.push(para("Details available upon request."));
     }
 
-    // Education
+    // education
     if (education.length) {
       children.push(label("EDUCATION"));
       education.forEach((e) => {
@@ -219,7 +216,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Build document
+    // build document
     const doc = new Document({
       sections: [
         {
@@ -237,6 +234,7 @@ export default async function handler(req, res) {
       "_"
     )}.docx`;
 
+    // send file
     res.setHeader(
       "Content-Disposition",
       `attachment; filename="${encodeURIComponent(filename)}"`
@@ -247,7 +245,7 @@ export default async function handler(req, res) {
     );
     return res.status(200).send(Buffer.from(buffer));
   } catch (err) {
-    console.error("❌ Resume generation failed:", err);
+    console.error("Resume generation failed:", err);
     return res.status(500).json({
       error: "Resume generation failed",
       details: String(err?.message || err),
