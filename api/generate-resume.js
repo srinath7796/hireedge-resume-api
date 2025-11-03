@@ -1,4 +1,4 @@
-// api/generate-resume.js
+// pages/api/generate-resume.js
 import {
   AlignmentType,
   Document,
@@ -7,7 +7,7 @@ import {
   TextRun,
 } from "docx";
 
-const ALLOWED_ORIGIN = "https://hireedge.co.uk"; // your Shopify domain
+const ALLOWED_ORIGIN = "https://hireedge.co.uk";
 
 const S = (v) => (v ?? "").toString().trim();
 
@@ -66,17 +66,16 @@ const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
 const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
 
 export default async function handler(req, res) {
-  // 1️⃣ CORS headers
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-  // 2️⃣ Preflight request
+  // preflight
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
-  // 3️⃣ Allow only POST
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST, OPTIONS");
     return res.status(405).json({ error: "Method Not Allowed" });
@@ -89,7 +88,7 @@ export default async function handler(req, res) {
 
     const children = [];
 
-    // ====== Document content ======
+    // header
     if (profile.fullName) {
       children.push(
         new Paragraph({
@@ -118,6 +117,8 @@ export default async function handler(req, res) {
         })
       );
     }
+
+    // summary
     if (jd || profile.yearsExp || profile.topSkills) {
       children.push(label("PROFILE SUMMARY"));
       const summary = jd
@@ -125,11 +126,15 @@ export default async function handler(req, res) {
         : `Experienced professional${profile.yearsExp ? ` with ${profile.yearsExp} years` : ""}.`;
       children.push(para(summary));
     }
+
+    // skills
     if (profile.topSkills) {
       children.push(label("KEY SKILLS"));
       const skills = profile.topSkills.split(",").map((s) => s.trim()).filter(Boolean);
       if (skills.length) children.push(para(skills.join(" • ")));
     }
+
+    // experience
     children.push(label("PROFESSIONAL EXPERIENCE"));
     if (experiences.length) {
       experiences.forEach((r) => {
@@ -151,6 +156,8 @@ export default async function handler(req, res) {
     } else {
       children.push(para("Details available upon request."));
     }
+
+    // education
     if (education.length) {
       children.push(label("EDUCATION"));
       education.forEach((e) => {
@@ -163,7 +170,9 @@ export default async function handler(req, res) {
       sections: [
         {
           properties: {
-            page: { margin: { top: 720, bottom: 720, left: 900, right: 900 } },
+            page: {
+              margin: { top: 720, bottom: 720, left: 900, right: 900 },
+            },
           },
           children,
         },
@@ -175,9 +184,14 @@ export default async function handler(req, res) {
       .replace(/[^a-z0-9]+/gi, "_")
       .trim()}.docx`;
 
-    // 4️⃣ Return the file (with CORS)
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(filename)}"`
+    );
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
     res.status(200).send(Buffer.from(buffer));
   } catch (err) {
     console.error(err);
