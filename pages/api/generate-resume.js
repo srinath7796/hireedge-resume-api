@@ -6,13 +6,10 @@ import {
   TextRun,
 } from "docx";
 
-// allow your Shopify domain
 const ALLOWED_ORIGIN = "https://hireedge.co.uk";
 
-// helper to safely trim values
 const S = (v) => (v ?? "").toString().trim();
 
-// normalize incoming body
 function normalize(body) {
   const jd = S(body.jd);
 
@@ -63,44 +60,36 @@ function normalize(body) {
 }
 
 export default async function handler(req, res) {
-  // 1) CORS
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-  // 2) preflight
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
 
-  // 3) quick health check
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
-      message: "HireEdge resume API is alive. Send POST to get DOCX.",
+      message: "HireEdge resume API is alive. POST to get DOCX.",
     });
   }
 
-  // 4) only POST after this
   if (req.method !== "POST") {
     res.setHeader("Allow", "GET, POST, OPTIONS");
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // 5) parse body
+  // parse body
   let body;
   try {
     body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
   } catch (err) {
-    return res.status(400).json({
-      error: "Invalid JSON body",
-      details: String(err?.message || err),
-    });
+    return res.status(400).json({ error: "Invalid JSON", details: String(err) });
   }
 
   const { jd, profile, experiences, education } = normalize(body);
 
-  // 6) 👉 dynamic import of docx (this is the fix)
+  // 👉 dynamic import
   let AlignmentType, Document, Packer, Paragraph, TextRun;
   try {
     const docx = await import("docx");
@@ -110,16 +99,12 @@ export default async function handler(req, res) {
     Paragraph = docx.Paragraph;
     TextRun = docx.TextRun;
   } catch (err) {
-    // if Vercel can't find docx, return a JSON error, not a 500 white page
-    console.error("Could not load docx:", err);
     return res.status(500).json({
-      error:
-        "Server could not load the 'docx' module. Make sure 'docx' is in package.json dependencies.",
+      error: "Could not load 'docx'. Add it to package.json dependencies.",
       details: String(err?.message || err),
     });
   }
 
-  // helper creators (now that docx is loaded)
   const label = (txt) =>
     new Paragraph({
       spacing: { before: 200, after: 80 },
@@ -131,7 +116,6 @@ export default async function handler(req, res) {
   try {
     const children = [];
 
-    // header
     if (profile.fullName) {
       children.push(
         new Paragraph({
@@ -163,16 +147,18 @@ export default async function handler(req, res) {
       );
     }
 
-    // summary
     if (jd || profile.yearsExp || profile.topSkills) {
       children.push(label("PROFILE SUMMARY"));
       const summary = jd
-        ? `Experienced professional${profile.yearsExp ? ` with ${profile.yearsExp} years` : ""} targeting roles aligned with the provided job description.`
-        : `Experienced professional${profile.yearsExp ? ` with ${profile.yearsExp} years` : ""}.`;
+        ? `Experienced professional${
+            profile.yearsExp ? ` with ${profile.yearsExp} years` : ""
+          } targeting roles aligned with the provided job description.`
+        : `Experienced professional${
+            profile.yearsExp ? ` with ${profile.yearsExp} years` : ""
+          }.`;
       children.push(para(summary));
     }
 
-    // skills
     if (profile.topSkills) {
       children.push(label("KEY SKILLS"));
       const skills = profile.topSkills
@@ -182,7 +168,6 @@ export default async function handler(req, res) {
       if (skills.length) children.push(para(skills.join(" • ")));
     }
 
-    // experience
     children.push(label("PROFESSIONAL EXPERIENCE"));
     if (experiences.length) {
       experiences.forEach((r) => {
@@ -205,18 +190,14 @@ export default async function handler(req, res) {
       children.push(para("Details available upon request."));
     }
 
-    // education
     if (education.length) {
       children.push(label("EDUCATION"));
       education.forEach((e) => {
-        const line = [e.degree, e.institution, e.year]
-          .filter(Boolean)
-          .join(", ");
+        const line = [e.degree, e.institution, e.year].filter(Boolean).join(", ");
         if (line) children.push(para(line));
       });
     }
 
-    // build document
     const doc = new Document({
       sections: [
         {
@@ -234,7 +215,6 @@ export default async function handler(req, res) {
       "_"
     )}.docx`;
 
-    // send file
     res.setHeader(
       "Content-Disposition",
       `attachment; filename="${encodeURIComponent(filename)}"`
