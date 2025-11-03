@@ -1,5 +1,3 @@
-// pages/api/generate-resume.js
-
 import {
   AlignmentType,
   Document,
