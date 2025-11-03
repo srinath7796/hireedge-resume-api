@@ -7,6 +7,8 @@ import {
   TextRun,
 } from "docx";
 
+const ALLOWED_ORIGIN = "https://hireedge.co.uk"; // your Shopify domain
+
 const S = (v) => (v ?? "").toString().trim();
 
 function normalize(body) {
@@ -66,14 +68,27 @@ const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
 const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
 
 export default async function handler(req, res) {
-  try {
-    if (req.method !== "POST") {
-      res.setHeader("Allow", "POST");
-      return res.status(405).json({ error: "Method Not Allowed" });
-    }
+  // 🔐 1. CORS for every request
+  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
+  // 🔁 2. Preflight handler
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  // 🚫 3. Only allow POST
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "POST, OPTIONS");
+    return res.status(405).json({ error: "Method Not Allowed" });
+  }
+
+  try {
+    // Shopify sometimes sends stringified JSON
     const body =
       typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+
     const { jd, profile, experiences, education } = normalize(body);
 
     const children = [];
@@ -88,6 +103,7 @@ export default async function handler(req, res) {
         })
       );
     }
+
     // Title
     if (profile.targetTitle) {
       children.push(
@@ -98,6 +114,7 @@ export default async function handler(req, res) {
         })
       );
     }
+
     // Contact
     const contact = [profile.email, profile.phone, profile.linkedin].filter(Boolean);
     if (contact.length) {
@@ -161,20 +178,37 @@ export default async function handler(req, res) {
     const doc = new Document({
       sections: [
         {
-          properties: { page: { margin: { top: 720, bottom: 720, left: 900, right: 900 } } },
+          properties: {
+            page: {
+              margin: { top: 720, bottom: 720, left: 900, right: 900 },
+            },
+          },
           children,
         },
       ],
     });
 
     const buffer = await Packer.toBuffer(doc);
-    const filename = `HireEdge_${(profile.targetTitle || "CV").replace(/[^a-z0-9]+/gi, "_")}.docx`;
+    const filename = `HireEdge_${(profile.targetTitle || "CV").replace(
+      /[^a-z0-9]+/gi,
+      "_"
+    )}.docx`;
 
-    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    // 🟢 success response WITH CORS
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(filename)}"`
+    );
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
     res.status(200).send(Buffer.from(buffer));
   } catch (err) {
     console.error(err);
-    res.status(400).json({ error: "Failed to generate resume", details: String(err?.message || err) });
+    // 🔴 error response WITH CORS
+    res
+      .status(400)
+      .json({ error: "Failed to generate resume", details: String(err?.message || err) });
   }
 }
