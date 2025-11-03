@@ -1,4 +1,5 @@
 // pages/api/generate-resume.js
+
 import {
   AlignmentType,
   Document,
@@ -7,20 +8,24 @@ import {
   TextRun,
 } from "docx";
 
-const ALLOWED_ORIGIN = "*";
+// ✅ allow only your Shopify domain
+const ALLOWED_ORIGIN = "https://hireedge.co.uk";
+
+// helper to safely trim values
 const S = (v) => (v ?? "").toString().trim();
 
+// normalize incoming body
 function normalize(body) {
   const jd = S(body.jd);
 
   const profile = {
-    fullName:    S(body?.profile?.fullName    || body?.fullName),
+    fullName: S(body?.profile?.fullName || body?.fullName),
     targetTitle: S(body?.profile?.targetTitle || body?.targetTitle),
-    email:       S(body?.profile?.email       || body?.email),
-    phone:       S(body?.profile?.phone       || body?.phone),
-    linkedin:    S(body?.profile?.linkedin    || body?.linkedin),
-    yearsExp:    S(body?.profile?.yearsExp    || body?.yearsExp),
-    topSkills:   S(body?.profile?.topSkills   || body?.topSkills),
+    email: S(body?.profile?.email || body?.email),
+    phone: S(body?.profile?.phone || body?.phone),
+    linkedin: S(body?.profile?.linkedin || body?.linkedin),
+    yearsExp: S(body?.profile?.yearsExp || body?.yearsExp),
+    topSkills: S(body?.profile?.topSkills || body?.topSkills),
   };
 
   let experiences =
@@ -39,7 +44,10 @@ function normalize(body) {
       end: S(r?.end),
       bullets: Array.isArray(r?.bullets)
         ? r.bullets.map(S).filter(Boolean)
-        : S(r?.bullets).split("\n").map((t) => t.trim()).filter(Boolean),
+        : S(r?.bullets)
+            .split("\n")
+            .map((t) => t.trim())
+            .filter(Boolean),
     }))
     .filter((r) => r.title || r.company || (r.bullets && r.bullets.length));
 
@@ -56,6 +64,7 @@ function normalize(body) {
   return { jd, profile, experiences, education };
 }
 
+// simple helper paragraphs
 const label = (txt) =>
   new Paragraph({
     spacing: { before: 200, after: 80 },
@@ -66,30 +75,38 @@ const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
 const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
 
 export default async function handler(req, res) {
-  // CORS so Shopify can call this
-  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-
-  // Preflight
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  // Only POST
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST, OPTIONS");
-    return res.status(405).json({ error: "Method Not Allowed" });
-  }
-
   try {
+    // ✅ CORS setup
+    res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+    // preflight
+    if (req.method === "OPTIONS") return res.status(200).end();
+
+    // browser GET test
+    if (req.method === "GET") {
+      return res.status(200).json({
+        ok: true,
+        message: "HireEdge Resume API is alive ✅ Send POST with JSON to generate a CV.",
+      });
+    }
+
+    // only allow POST
+    if (req.method !== "POST") {
+      res.setHeader("Allow", "GET, POST, OPTIONS");
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    // parse body safely
     const body =
       typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const { jd, profile, experiences, education } = normalize(body);
 
+    // start building docx
     const children = [];
 
-    // Header
+    // Name
     if (profile.fullName) {
       children.push(
         new Paragraph({
@@ -99,6 +116,8 @@ export default async function handler(req, res) {
         })
       );
     }
+
+    // Title
     if (profile.targetTitle) {
       children.push(
         new Paragraph({
@@ -108,6 +127,8 @@ export default async function handler(req, res) {
         })
       );
     }
+
+    // Contact
     const contact = [profile.email, profile.phone, profile.linkedin].filter(Boolean);
     if (contact.length) {
       children.push(
@@ -131,7 +152,10 @@ export default async function handler(req, res) {
     // Skills
     if (profile.topSkills) {
       children.push(label("KEY SKILLS"));
-      const skills = profile.topSkills.split(",").map((s) => s.trim()).filter(Boolean);
+      const skills = profile.topSkills
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
       if (skills.length) children.push(para(skills.join(" • ")));
     }
 
@@ -162,11 +186,14 @@ export default async function handler(req, res) {
     if (education.length) {
       children.push(label("EDUCATION"));
       education.forEach((e) => {
-        const line = [e.degree, e.institution, e.year].filter(Boolean).join(", ");
+        const line = [e.degree, e.institution, e.year]
+          .filter(Boolean)
+          .join(", ");
         if (line) children.push(para(line));
       });
     }
 
+    // Build document
     const doc = new Document({
       sections: [
         {
@@ -184,6 +211,7 @@ export default async function handler(req, res) {
       "_"
     )}.docx`;
 
+    // send docx
     res.setHeader(
       "Content-Disposition",
       `attachment; filename="${encodeURIComponent(filename)}"`
@@ -194,9 +222,10 @@ export default async function handler(req, res) {
     );
     res.status(200).send(Buffer.from(buffer));
   } catch (err) {
-    console.error(err);
-    res
-      .status(400)
-      .json({ error: "Failed to generate resume", details: String(err?.message || err) });
+    console.error("❌ Resume generation failed:", err);
+    res.status(500).json({
+      error: "Resume generation failed",
+      details: String(err?.message || err),
+    });
   }
 }
