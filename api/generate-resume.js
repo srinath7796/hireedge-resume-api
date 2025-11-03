@@ -1,4 +1,4 @@
-// pages/api/generate-resume.js
+// api/generate-resume.js
 import {
   AlignmentType,
   Document,
@@ -13,7 +13,6 @@ const S = (v) => (v ?? "").toString().trim();
 
 function normalize(body) {
   const jd = S(body.jd);
-
   const profile = {
     fullName:    S(body?.profile?.fullName    || body?.fullName),
     targetTitle: S(body?.profile?.targetTitle || body?.targetTitle),
@@ -64,36 +63,33 @@ const label = (txt) =>
   });
 
 const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
-
 const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
 
 export default async function handler(req, res) {
-  // 🔐 1. CORS for every request
+  // 1️⃣ CORS headers
   res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-  // 🔁 2. Preflight handler
+  // 2️⃣ Preflight request
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
-  // 🚫 3. Only allow POST
+  // 3️⃣ Allow only POST
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST, OPTIONS");
     return res.status(405).json({ error: "Method Not Allowed" });
   }
 
   try {
-    // Shopify sometimes sends stringified JSON
     const body =
       typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
-
     const { jd, profile, experiences, education } = normalize(body);
 
     const children = [];
 
-    // Name
+    // ====== Document content ======
     if (profile.fullName) {
       children.push(
         new Paragraph({
@@ -103,8 +99,6 @@ export default async function handler(req, res) {
         })
       );
     }
-
-    // Title
     if (profile.targetTitle) {
       children.push(
         new Paragraph({
@@ -114,8 +108,6 @@ export default async function handler(req, res) {
         })
       );
     }
-
-    // Contact
     const contact = [profile.email, profile.phone, profile.linkedin].filter(Boolean);
     if (contact.length) {
       children.push(
@@ -126,8 +118,6 @@ export default async function handler(req, res) {
         })
       );
     }
-
-    // Summary
     if (jd || profile.yearsExp || profile.topSkills) {
       children.push(label("PROFILE SUMMARY"));
       const summary = jd
@@ -135,15 +125,11 @@ export default async function handler(req, res) {
         : `Experienced professional${profile.yearsExp ? ` with ${profile.yearsExp} years` : ""}.`;
       children.push(para(summary));
     }
-
-    // Skills
     if (profile.topSkills) {
       children.push(label("KEY SKILLS"));
       const skills = profile.topSkills.split(",").map((s) => s.trim()).filter(Boolean);
       if (skills.length) children.push(para(skills.join(" • ")));
     }
-
-    // Experience
     children.push(label("PROFESSIONAL EXPERIENCE"));
     if (experiences.length) {
       experiences.forEach((r) => {
@@ -165,8 +151,6 @@ export default async function handler(req, res) {
     } else {
       children.push(para("Details available upon request."));
     }
-
-    // Education
     if (education.length) {
       children.push(label("EDUCATION"));
       education.forEach((e) => {
@@ -179,9 +163,7 @@ export default async function handler(req, res) {
       sections: [
         {
           properties: {
-            page: {
-              margin: { top: 720, bottom: 720, left: 900, right: 900 },
-            },
+            page: { margin: { top: 720, bottom: 720, left: 900, right: 900 } },
           },
           children,
         },
@@ -189,24 +171,16 @@ export default async function handler(req, res) {
     });
 
     const buffer = await Packer.toBuffer(doc);
-    const filename = `HireEdge_${(profile.targetTitle || "CV").replace(
-      /[^a-z0-9]+/gi,
-      "_"
-    )}.docx`;
+    const filename = `HireEdge_${(profile.targetTitle || "CV")
+      .replace(/[^a-z0-9]+/gi, "_")
+      .trim()}.docx`;
 
-    // 🟢 success response WITH CORS
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${encodeURIComponent(filename)}"`
-    );
-    res.setHeader(
-      "Content-Type",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    );
+    // 4️⃣ Return the file (with CORS)
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
     res.status(200).send(Buffer.from(buffer));
   } catch (err) {
     console.error(err);
-    // 🔴 error response WITH CORS
     res
       .status(400)
       .json({ error: "Failed to generate resume", details: String(err?.message || err) });
