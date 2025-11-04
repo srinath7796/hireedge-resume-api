@@ -8,7 +8,7 @@ import {
 } from "docx";
 import OpenAI from "openai";
 
-const ALLOWED_ORIGIN = "https://hireedge.co.uk"; // change if needed
+const ALLOWED_ORIGIN = "https://hireedge.co.uk"; // change if your domain differs
 const S = (v) => (v ?? "").toString().trim();
 
 // create client only if key exists
@@ -26,12 +26,64 @@ const label = (txt) =>
 const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
 const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
 
-// strip html / weird spacing
+/**
+ * Quick-and-dirty JD keyword extractor.
+ * Goal: pull out the top terms so we can add them to skills and nudge AI to use them.
+ */
+function extractKeywordsFromJD(jd = "", limit = 10) {
+  if (!jd) return [];
+  const text = jd.toLowerCase();
+  const words = text.split(/[^a-z0-9+]+/).filter(Boolean);
+
+  const stop = new Set([
+    "and",
+    "the",
+    "to",
+    "of",
+    "for",
+    "with",
+    "in",
+    "on",
+    "a",
+    "an",
+    "is",
+    "are",
+    "as",
+    "you",
+    "your",
+    "will",
+    "be",
+    "this",
+    "that",
+    "we",
+    "our",
+    "at",
+    "by",
+    "or",
+    "from",
+    "job",
+    "description",
+  ]);
+
+  const counts = {};
+  for (const w of words) {
+    if (stop.has(w)) continue;
+    if (w.length < 3) continue;
+    counts[w] = (counts[w] || 0) + 1;
+  }
+
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([w]) => w)
+    .slice(0, limit);
+}
+
+// strip html / weird spacing (kept from original)
 function cleanPlainText(txt = "") {
   return txt.replace(/<[^>]*>/g, " ").replace(/\r/g, "\n").trim();
 }
 
-// naive parser for pasted CV text
+// parse pasted CV into experience + education (original logic)
 function parseOldCvSmart(raw = "") {
   const text = raw.replace(/\r/g, "\n");
   const lines = text
@@ -96,8 +148,9 @@ function parseOldCvSmart(raw = "") {
   return { experiences, education };
 }
 
-/* AI bits */
-async function buildSummary({ profile, jd, sourceSummary }) {
+/* ---------- AI helpers ---------- */
+
+async function buildSummary({ profile, jd, sourceSummary, jdKeywords = [] }) {
   const client = getOpenAIClient();
   if (!client) {
     return (
@@ -108,7 +161,8 @@ async function buildSummary({ profile, jd, sourceSummary }) {
 
   const prompt = `
 You are a UK CV writer.
-Rewrite this summary so it is 3–4 sentences, ATS-friendly, and aligned to the job description.
+Rewrite this PROFILE SUMMARY so it is 3–4 sentences, ATS-friendly, and aligned to the job description.
+Try to naturally include these JD keywords if they fit: ${jdKeywords.join(", ")}
 Do NOT invent achievements.
 
 Candidate:
@@ -116,7 +170,7 @@ Candidate:
 - Target: ${profile.targetTitle || "role"}
 - Skills: ${profile.topSkills || "N/A"}
 
-Existing summary / top of CV:
+Existing summary / top of CV (may be empty):
 """${sourceSummary || ""}"""
 
 Job description:
@@ -134,7 +188,7 @@ Return only the final summary.
   return resp.choices[0].message.content.trim();
 }
 
-async function buildBulletsForRole({ role, jd, profile }) {
+async function buildBulletsForRole({ role, jd, profile, jdKeywords = [] }) {
   const client = getOpenAIClient();
   if (!client) {
     return [
@@ -145,11 +199,18 @@ async function buildBulletsForRole({ role, jd, profile }) {
 
   const prompt = `
 Write 4 resume bullet points (UK English) for this role. No fake numbers.
+Make it ATS-friendly and aligned to the job description.
+If it is natural, include or echo these JD keywords: ${jdKeywords.join(", ")}
+
 Role: ${role.title || "Sales / Customer role"}
 Company: ${role.company || ""}
-Job description (to align to):
+
+Job description to align to:
 """${jd}"""
+
 Candidate skills: ${profile.topSkills || "N/A"}
+
+Return only the bullets, one per line, no numbering.
 `;
 
   const resp = await client.chat.completions.create({
@@ -164,6 +225,8 @@ Candidate skills: ${profile.topSkills || "N/A"}
     .filter(Boolean)
     .slice(0, 4);
 }
+
+/* ---------- main handler ---------- */
 
 export default async function handler(req, res) {
   // CORS
@@ -206,6 +269,7 @@ export default async function handler(req, res) {
     let education = [];
 
     if (mode === "manual") {
+      // take what Shopify sends
       experiences =
         body.experience ||
         body.experiences ||
@@ -245,16 +309,20 @@ export default async function handler(req, res) {
       education = parsed.education;
     }
 
-    // SUMMARY
+    // 1) extract extra keywords from the JD to reinforce ATS
+    const jdKeywords = extractKeywordsFromJD(jd, 10);
+
+    // 2) build summary (AI) – now keyword aware
     const pastedTop =
       (body.oldCvText || "").split("\n").slice(0, 10).join(" ");
     const aiSummary = await buildSummary({
       profile,
       jd,
       sourceSummary: pastedTop,
+      jdKeywords,
     });
 
-    // build docx
+    // start building DOCX
     const children = [];
 
     // header
@@ -295,18 +363,19 @@ export default async function handler(req, res) {
     children.push(label("PROFILE SUMMARY"));
     children.push(para(aiSummary));
 
-    // skills
-    if (profile.topSkills) {
+    // skills – merge user skills + JD keywords
+    const userSkills = profile.topSkills
+      ? profile.topSkills.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    const mergedSkills = Array.from(
+      new Set([
+        ...userSkills,
+        ...jdKeywords.map((k) => k.replace(/^\w/, (c) => c.toUpperCase())),
+      ])
+    );
+    if (mergedSkills.length) {
       children.push(label("KEY SKILLS"));
-      children.push(
-        para(
-          profile.topSkills
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean)
-            .join(" • ")
-        )
-      );
+      children.push(para(mergedSkills.join(" • ")));
     }
 
     // experience
@@ -322,14 +391,23 @@ export default async function handler(req, res) {
             })
           );
         }
-        const sub = [role.location, [role.start, role.end].filter(Boolean).join(" – ")]
+        const sub = [
+          role.location,
+          [role.start, role.end].filter(Boolean).join(" – "),
+        ]
           .filter(Boolean)
           .join("  |  ");
         if (sub) children.push(para(sub));
 
         let bulletsArr = role.bullets || [];
         if (!bulletsArr.length) {
-          bulletsArr = await buildBulletsForRole({ role, jd, profile });
+          // ask AI to create JD-aligned bullets
+          bulletsArr = await buildBulletsForRole({
+            role,
+            jd,
+            profile,
+            jdKeywords,
+          });
         }
         bulletsArr.forEach((b) => children.push(bullet(b)));
       }
@@ -350,6 +428,7 @@ export default async function handler(req, res) {
       children.push(para("Education details available on request."));
     }
 
+    // final docx
     const doc = new Document({
       sections: [
         {
