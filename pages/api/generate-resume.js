@@ -1,4 +1,6 @@
 // pages/api/generate-resume.js
+// HireEdge — AI CV Generator (with JD keyword injection + bullet enhancement)
+
 import {
   AlignmentType,
   Document,
@@ -8,7 +10,7 @@ import {
 } from "docx";
 import OpenAI from "openai";
 
-const ALLOWED_ORIGIN = "https://hireedge.co.uk"; // change if your domain differs
+const ALLOWED_ORIGIN = "https://hireedge.co.uk"; // change if needed
 const S = (v) => (v ?? "").toString().trim();
 
 // create client only if key exists
@@ -27,48 +29,55 @@ const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
 const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
 
 /**
- * Quick-and-dirty JD keyword extractor.
- * Goal: pull out the top terms so we can add them to skills and nudge AI to use them.
+ * Better JD keyword extractor
+ * - ignores super-common words
+ * - ignores very short words
+ * - keeps only top N
  */
 function extractKeywordsFromJD(jd = "", limit = 10) {
   if (!jd) return [];
   const text = jd.toLowerCase();
   const words = text.split(/[^a-z0-9+]+/).filter(Boolean);
 
-  const stop = new Set([
+  // words we never want in skills
+  const bad = new Set([
     "and",
     "the",
-    "to",
-    "of",
     "for",
     "with",
-    "in",
-    "on",
-    "a",
-    "an",
-    "is",
-    "are",
-    "as",
-    "you",
     "your",
-    "will",
-    "be",
-    "this",
-    "that",
-    "we",
+    "you",
     "our",
-    "at",
-    "by",
-    "or",
-    "from",
+    "their",
+    "will",
+    "able",
+    "work",
+    "role",
+    "team",
+    "looking",
+    "join",
+    "growing",
+    "environment",
+    "experience",
+    "service",
+    "customer", // we'll already have it anyway
+    "support",
+    "provide",
+    "required",
+    "essential",
+    "previous",
+    "contact",
+    "centre",
+    "center",
+    "must",
     "job",
     "description",
   ]);
 
   const counts = {};
   for (const w of words) {
-    if (stop.has(w)) continue;
-    if (w.length < 3) continue;
+    if (bad.has(w)) continue;
+    if (w.length < 4) continue; // drop tiny words
     counts[w] = (counts[w] || 0) + 1;
   }
 
@@ -78,12 +87,7 @@ function extractKeywordsFromJD(jd = "", limit = 10) {
     .slice(0, limit);
 }
 
-// strip html / weird spacing (kept from original)
-function cleanPlainText(txt = "") {
-  return txt.replace(/<[^>]*>/g, " ").replace(/\r/g, "\n").trim();
-}
-
-// parse pasted CV into experience + education (original logic)
+// parse pasted CV into experience + education
 function parseOldCvSmart(raw = "") {
   const text = raw.replace(/\r/g, "\n");
   const lines = text
@@ -164,13 +168,14 @@ You are a UK CV writer.
 Rewrite this PROFILE SUMMARY so it is 3–4 sentences, ATS-friendly, and aligned to the job description.
 Try to naturally include these JD keywords if they fit: ${jdKeywords.join(", ")}
 Do NOT invent achievements.
+Tone: professional, not robotic.
 
 Candidate:
 - Name: ${profile.fullName || "Candidate"}
 - Target: ${profile.targetTitle || "role"}
 - Skills: ${profile.topSkills || "N/A"}
 
-Existing summary / top of CV (may be empty):
+Existing summary (may be empty):
 """${sourceSummary || ""}"""
 
 Job description:
@@ -182,12 +187,13 @@ Return only the final summary.
   const resp = await client.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [{ role: "user", content: prompt }],
-    temperature: 0.5,
+    temperature: 0.35, // a bit tighter, less waffle
   });
 
   return resp.choices[0].message.content.trim();
 }
 
+// generates fresh bullets when there are none
 async function buildBulletsForRole({ role, jd, profile, jdKeywords = [] }) {
   const client = getOpenAIClient();
   if (!client) {
@@ -201,8 +207,9 @@ async function buildBulletsForRole({ role, jd, profile, jdKeywords = [] }) {
 Write 4 resume bullet points (UK English) for this role. No fake numbers.
 Make it ATS-friendly and aligned to the job description.
 If it is natural, include or echo these JD keywords: ${jdKeywords.join(", ")}
+Avoid repeating the same keyword in every bullet.
 
-Role: ${role.title || "Sales / Customer role"}
+Role: ${role.title || "Customer Service / Admin role"}
 Company: ${role.company || ""}
 
 Job description to align to:
@@ -210,13 +217,13 @@ Job description to align to:
 
 Candidate skills: ${profile.topSkills || "N/A"}
 
-Return only the bullets, one per line, no numbering.
+Return only the bullets, one per line.
 `;
 
   const resp = await client.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [{ role: "user", content: prompt }],
-    temperature: 0.6,
+    temperature: 0.55,
   });
 
   return resp.choices[0].message.content
@@ -224,6 +231,46 @@ Return only the bullets, one per line, no numbering.
     .map((l) => l.replace(/^[-•]\s?/, "").trim())
     .filter(Boolean)
     .slice(0, 4);
+}
+
+// NEW: enhances existing user bullets so they match the JD & add ATS language
+async function enhanceExistingBullets({ bullets, role, jd, jdKeywords = [], profile }) {
+  const client = getOpenAIClient();
+  if (!client) return bullets; // no AI → keep original
+
+  const prompt = `
+You are rewriting CV bullet points for the UK market.
+Rewrite the bullets below so they:
+1) stay factually true (same responsibilities),
+2) sound more achievement/impact-oriented,
+3) are aligned to this job description,
+4) naturally include some of these JD keywords if they fit: ${jdKeywords.join(", ")},
+5) avoid making up numbers or fake KPIs.
+
+Role: ${role.title || "Customer Service / Admin role"}
+
+Job description:
+"""${jd}"""
+
+Original bullets:
+${bullets.map((b) => "- " + b).join("\n")}
+
+Return ONLY the improved bullets, one per line, no numbering.
+`;
+
+  const resp = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0.45,
+  });
+
+  const rewritten = resp.choices[0].message.content
+    .split("\n")
+    .map((l) => l.replace(/^[-•]\s?/, "").trim())
+    .filter(Boolean);
+
+  // keep length similar
+  return rewritten.length ? rewritten : bullets;
 }
 
 /* ---------- main handler ---------- */
@@ -269,7 +316,6 @@ export default async function handler(req, res) {
     let education = [];
 
     if (mode === "manual") {
-      // take what Shopify sends
       experiences =
         body.experience ||
         body.experiences ||
@@ -309,10 +355,10 @@ export default async function handler(req, res) {
       education = parsed.education;
     }
 
-    // 1) extract extra keywords from the JD to reinforce ATS
+    // extract JD keywords up front
     const jdKeywords = extractKeywordsFromJD(jd, 10);
 
-    // 2) build summary (AI) – now keyword aware
+    // build summary
     const pastedTop =
       (body.oldCvText || "").split("\n").slice(0, 10).join(" ");
     const aiSummary = await buildSummary({
@@ -322,7 +368,7 @@ export default async function handler(req, res) {
       jdKeywords,
     });
 
-    // start building DOCX
+    // start building docx
     const children = [];
 
     // header
@@ -363,7 +409,7 @@ export default async function handler(req, res) {
     children.push(label("PROFILE SUMMARY"));
     children.push(para(aiSummary));
 
-    // skills – merge user skills + JD keywords
+    // skills – merge user skills + JD keywords, then cap length
     const userSkills = profile.topSkills
       ? profile.topSkills.split(",").map((s) => s.trim()).filter(Boolean)
       : [];
@@ -373,9 +419,10 @@ export default async function handler(req, res) {
         ...jdKeywords.map((k) => k.replace(/^\w/, (c) => c.toUpperCase())),
       ])
     );
-    if (mergedSkills.length) {
+    const limitedSkills = mergedSkills.slice(0, 14); // cap
+    if (limitedSkills.length) {
       children.push(label("KEY SKILLS"));
-      children.push(para(mergedSkills.join(" • ")));
+      children.push(para(limitedSkills.join(" • ")));
     }
 
     // experience
@@ -400,8 +447,18 @@ export default async function handler(req, res) {
         if (sub) children.push(para(sub));
 
         let bulletsArr = role.bullets || [];
-        if (!bulletsArr.length) {
-          // ask AI to create JD-aligned bullets
+
+        if (bulletsArr.length) {
+          // NEW: enhance existing bullets to match JD
+          bulletsArr = await enhanceExistingBullets({
+            bullets: bulletsArr,
+            role,
+            jd,
+            jdKeywords,
+            profile,
+          });
+        } else {
+          // no bullets -> generate fresh
           bulletsArr = await buildBulletsForRole({
             role,
             jd,
@@ -409,6 +466,7 @@ export default async function handler(req, res) {
             jdKeywords,
           });
         }
+
         bulletsArr.forEach((b) => children.push(bullet(b)));
       }
     } else {
@@ -428,7 +486,7 @@ export default async function handler(req, res) {
       children.push(para("Education details available on request."));
     }
 
-    // final docx
+    // build doc
     const doc = new Document({
       sections: [
         {
