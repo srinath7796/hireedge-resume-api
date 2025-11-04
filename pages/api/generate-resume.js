@@ -9,28 +9,33 @@ import {
 } from "docx";
 import OpenAI from "openai";
 
+// allow Shopify
 const ALLOWED_ORIGIN = "https://hireedge.co.uk";
+
+// safe trim
 const S = (v) => (v ?? "").toString().trim();
 
-/* -----------------------------
-   create client only if we have key
------------------------------- */
+/* create client only if we have key */
 function getOpenAIClient() {
   if (!process.env.OPENAI_API_KEY) return null;
   return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
-/* 1) clean pasted CV text (remove HTML) */
+/* remove html etc. */
 function cleanPlainText(txt = "") {
   return txt.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 }
 
-/* 2) try to pull exp / edu from pasted CV (very light) */
+/* very light parser for pasted CV */
 function parseOldCv(oldCvText = "") {
   const text = cleanPlainText(oldCvText);
   if (!text) return { exp: [], edu: [] };
 
-  const lines = text.split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
+  const lines = text
+    .split(/[\r\n]+/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
   const exp = [];
   const edu = [];
 
@@ -38,17 +43,23 @@ function parseOldCv(oldCvText = "") {
   const headerNoise = /(summary|profile|linkedin\.com|@|phone|gmail\.com)/i;
 
   let currentExp = null;
+
   for (const line of lines) {
+    // skip headers
     if (headerNoise.test(line)) continue;
 
-    // education
+    // education-ish line
     if (eduKeywords.test(line)) {
       edu.push({ degree: line, institution: "", year: "" });
       continue;
     }
 
     // looks like a job line
-    if (/analyst|manager|executive|counsellor|engineer|consultant|assistant/i.test(line)) {
+    if (
+      /(analyst|manager|executive|counsellor|engineer|consultant|assistant)/i.test(
+        line
+      )
+    ) {
       if (currentExp) exp.push(currentExp);
       currentExp = {
         title: line,
@@ -61,67 +72,70 @@ function parseOldCv(oldCvText = "") {
       continue;
     }
 
-    // bullet under current job
+    // bullet
     if ((line.startsWith("-") || line.startsWith("•")) && currentExp) {
       currentExp.bullets.push(line.replace(/^[-•]\s?/, "").trim());
     }
   }
+
   if (currentExp) exp.push(currentExp);
 
   return { exp, edu };
 }
 
-/* 3) GPT: make human + tailored summary */
+/* ---- AI helpers ---- */
+
 async function generateSummary(profile, jd) {
   const client = getOpenAIClient();
   if (!client) {
-    // fallback if no key
+    // fallback
     return `Analytical ${profile.targetTitle || "professional"} with ${
-      profile.yearsExp || "proven"
-    } experience, skilled in ${profile.topSkills || "data analysis"}, targeting UK roles.`;
+      profile.yearsExp || "relevant"
+    } experience, skilled in ${profile.topSkills || "data analysis"}, aligned to role requirements.`;
   }
 
   const prompt = `
-Write a 4–5 line resume summary in UK English for:
-Name: ${profile.fullName || "the candidate"}
-Target role: ${profile.targetTitle || "Data Analyst"}
-Skills: ${profile.topSkills || "Power BI, SQL, Excel"}
+Write a 4–5 line UK-style resume summary.
 
-Job description to align with:
+Candidate:
+- Name: ${profile.fullName || "the candidate"}
+- Target role: ${profile.targetTitle || "Data Analyst"}
+- Skills: ${profile.topSkills || "Power BI, SQL, Excel"}
+- Experience: ${profile.yearsExp || "3"} years
+
+Job description:
 """${jd}"""
 
-Requirements:
-- ATS friendly
-- confident, not salesy
-- mention results / value
-  `;
+Rules:
+- ATS-friendly
+- confident but not salesy
+- mention value / impact
+`;
 
   const resp = await client.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [{ role: "user", content: prompt }],
     temperature: 0.7,
   });
+
   return resp.choices[0].message.content.trim();
 }
 
-/* 4) GPT: create 4–5 bullets for experience if user didn’t give any */
 async function generateExperienceBullets(profile, jd) {
   const client = getOpenAIClient();
   if (!client) {
     return [
-      "Cleaned and transformed datasets to support reporting.",
-      "Developed dashboards in Power BI and Excel.",
+      "Delivered reports and dashboards to support stakeholder decisions.",
+      "Cleaned and prepared data to improve reporting accuracy.",
     ];
   }
 
   const prompt = `
-Create 4 action-based resume bullet points for a ${
-    profile.targetTitle || "Data Analyst"
-  } role in the UK.
-Use skills: ${profile.topSkills || "data analysis"}.
+Create 4 bullet points for a CV for a ${profile.targetTitle || "Data Analyst"}.
 Tailor to this JD:
 """${jd}"""
-Each bullet: start with a verb, short, specific, ATS friendly.`;
+Bullets must be action-based, short, measurable where possible, ATS-friendly.
+`;
 
   const resp = await client.chat.completions.create({
     model: "gpt-4o-mini",
@@ -136,7 +150,7 @@ Each bullet: start with a verb, short, specific, ATS friendly.`;
     .slice(0, 5);
 }
 
-/* 5) small docx helpers */
+/* docx helpers */
 const label = (txt) =>
   new Paragraph({
     spacing: { before: 200, after: 80 },
@@ -144,6 +158,7 @@ const label = (txt) =>
   });
 
 const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
+
 const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
 
 export default async function handler(req, res) {
@@ -157,7 +172,7 @@ export default async function handler(req, res) {
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
-      message: "AI Resume API alive. Send POST with profile + jd.",
+      message: "HireEdge Resume API is alive ✅ send POST to get DOCX",
     });
   }
 
@@ -167,29 +182,29 @@ export default async function handler(req, res) {
   }
 
   try {
-    const body =
-      typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const raw = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
 
-    const jd = S(body.jd);
+    const jd = S(raw.jd);
     const oldCvText = cleanPlainText(
-      body.oldCvText || body.old_cv_text || body.cvText || ""
+      raw.oldCvText || raw.old_cv_text || raw.cvText || ""
     );
 
+    // profile from form
     const profile = {
-      fullName: S(body?.profile?.fullName || body?.fullName),
-      targetTitle: S(body?.profile?.targetTitle || body?.targetTitle),
-      email: S(body?.profile?.email || body?.email),
-      phone: S(body?.profile?.phone || body?.phone),
-      linkedin: S(body?.profile?.linkedin || body?.linkedin),
-      yearsExp: S(body?.profile?.yearsExp || body?.yearsExp),
-      topSkills: S(body?.profile?.topSkills || body?.topSkills),
+      fullName: S(raw?.profile?.fullName || raw?.fullName),
+      targetTitle: S(raw?.profile?.targetTitle || raw?.targetTitle),
+      email: S(raw?.profile?.email || raw?.email),
+      phone: S(raw?.profile?.phone || raw?.phone),
+      linkedin: S(raw?.profile?.linkedin || raw?.linkedin),
+      yearsExp: S(raw?.profile?.yearsExp || raw?.yearsExp),
+      topSkills: S(raw?.profile?.topSkills || raw?.topSkills),
     };
 
-    // experience from form
+    // experiences from form
     let experiences =
-      body?.experience ||
-      body?.experiences ||
-      body?.profile?.experiences ||
+      raw?.experience ||
+      raw?.experiences ||
+      raw?.profile?.experiences ||
       [];
     if (!Array.isArray(experiences)) experiences = [];
     experiences = experiences
@@ -209,7 +224,7 @@ export default async function handler(req, res) {
       .filter((r) => r.title || r.company || (r.bullets && r.bullets.length));
 
     // education from form
-    let education = body?.education || body?.profile?.education || [];
+    let education = raw?.education || raw?.profile?.education || [];
     if (!Array.isArray(education)) education = [];
     education = education
       .map((e) => ({
@@ -219,7 +234,7 @@ export default async function handler(req, res) {
       }))
       .filter((e) => e.degree || e.institution || e.year);
 
-    // if user pasted old CV, try to fill gaps
+    // if pasted CV, try to backfill
     if (oldCvText) {
       const { exp: parsedExp, edu: parsedEdu } = parseOldCv(oldCvText);
       if (experiences.length === 0 && parsedExp.length) {
@@ -230,14 +245,14 @@ export default async function handler(req, res) {
       }
     }
 
-    // call GPT for summary & bullets
+    // AI bits
     const aiSummary = await generateSummary(profile, jd);
     const aiBullets =
       experiences.length === 0
         ? await generateExperienceBullets(profile, jd)
         : [];
 
-    // start building doc
+    // start building docx
     const children = [];
 
     // header
@@ -246,9 +261,7 @@ export default async function handler(req, res) {
         new Paragraph({
           alignment: AlignmentType.CENTER,
           spacing: { after: 80 },
-          children: [
-            new TextRun({ text: profile.fullName, bold: true, size: 40 }),
-          ],
+          children: [new TextRun({ text: profile.fullName, bold: true, size: 40 })],
         })
       );
     }
@@ -279,15 +292,12 @@ export default async function handler(req, res) {
     // skills
     if (profile.topSkills) {
       children.push(label("KEY SKILLS"));
-      children.push(
-        para(
-          profile.topSkills
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean)
-            .join(" • ")
-        )
-      );
+      const skills = profile.topSkills
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .join(" • ");
+      children.push(para(skills));
     }
 
     // experience
@@ -310,7 +320,7 @@ export default async function handler(req, res) {
         (r.bullets || []).forEach((b) => children.push(bullet(b)));
       });
     } else {
-      // no experience in form or CV → use AI bullets
+      // no exp → use AI bullets
       children.push(
         new Paragraph({
           spacing: { before: 120, after: 40 },
@@ -329,16 +339,14 @@ export default async function handler(req, res) {
     children.push(label("EDUCATION"));
     if (education.length) {
       education.forEach((e) => {
-        const line = [e.degree, e.institution, e.year]
-          .filter(Boolean)
-          .join(", ");
+        const line = [e.degree, e.institution, e.year].filter(Boolean).join(", ");
         if (line) children.push(para(line));
       });
     } else {
       children.push(para("Education details available on request."));
     }
 
-    // build docx
+    // build
     const doc = new Document({
       sections: [
         {
