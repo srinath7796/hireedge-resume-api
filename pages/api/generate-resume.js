@@ -11,7 +11,14 @@ import OpenAI from "openai";
 
 const ALLOWED_ORIGIN = "https://hireedge.co.uk";
 const S = (v) => (v ?? "").toString().trim();
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+/* -----------------------------
+   create client only if we have key
+------------------------------ */
+function getOpenAIClient() {
+  if (!process.env.OPENAI_API_KEY) return null;
+  return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+}
 
 /* 1) clean pasted CV text (remove HTML) */
 function cleanPlainText(txt = "") {
@@ -34,12 +41,14 @@ function parseOldCv(oldCvText = "") {
   for (const line of lines) {
     if (headerNoise.test(line)) continue;
 
+    // education
     if (eduKeywords.test(line)) {
       edu.push({ degree: line, institution: "", year: "" });
       continue;
     }
 
-    if (/analyst|manager|executive|counsellor|engineer|consultant/i.test(line)) {
+    // looks like a job line
+    if (/analyst|manager|executive|counsellor|engineer|consultant|assistant/i.test(line)) {
       if (currentExp) exp.push(currentExp);
       currentExp = {
         title: line,
@@ -52,6 +61,7 @@ function parseOldCv(oldCvText = "") {
       continue;
     }
 
+    // bullet under current job
     if ((line.startsWith("-") || line.startsWith("•")) && currentExp) {
       currentExp.bullets.push(line.replace(/^[-•]\s?/, "").trim());
     }
@@ -63,7 +73,8 @@ function parseOldCv(oldCvText = "") {
 
 /* 3) GPT: make human + tailored summary */
 async function generateSummary(profile, jd) {
-  if (!process.env.OPENAI_API_KEY) {
+  const client = getOpenAIClient();
+  if (!client) {
     // fallback if no key
     return `Analytical ${profile.targetTitle || "professional"} with ${
       profile.yearsExp || "proven"
@@ -95,7 +106,8 @@ Requirements:
 
 /* 4) GPT: create 4–5 bullets for experience if user didn’t give any */
 async function generateExperienceBullets(profile, jd) {
-  if (!process.env.OPENAI_API_KEY) {
+  const client = getOpenAIClient();
+  if (!client) {
     return [
       "Cleaned and transformed datasets to support reporting.",
       "Developed dashboards in Power BI and Excel.",
@@ -152,7 +164,7 @@ export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "GET, POST, OPTIONS");
     return res.status(405).json({ error: "Method not allowed" });
-    }
+  }
 
   try {
     const body =
@@ -173,7 +185,7 @@ export default async function handler(req, res) {
       topSkills: S(body?.profile?.topSkills || body?.topSkills),
     };
 
-    // from form
+    // experience from form
     let experiences =
       body?.experience ||
       body?.experiences ||
@@ -196,7 +208,7 @@ export default async function handler(req, res) {
       }))
       .filter((r) => r.title || r.company || (r.bullets && r.bullets.length));
 
-    // from form
+    // education from form
     let education = body?.education || body?.profile?.education || [];
     if (!Array.isArray(education)) education = [];
     education = education
