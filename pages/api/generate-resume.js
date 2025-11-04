@@ -7,65 +7,27 @@ import {
   Paragraph,
   TextRun,
 } from "docx";
+import OpenAI from "openai";
 
-// ✅ your Shopify domain
 const ALLOWED_ORIGIN = "https://hireedge.co.uk";
 const S = (v) => (v ?? "").toString().trim();
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ------------------ helpers ------------------ */
-
-// strip HTML / extra spaces
+/* 1) clean pasted CV text (remove HTML) */
 function cleanPlainText(txt = "") {
-  let out = txt.replace(/<[^>]*>/g, " ");
-  out = out.replace(/\s+/g, " ").trim();
-  return out;
+  return txt.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 }
 
-// pull up to 4 good lines from JD, skip marketing intros
-function extractJDBullets(jd = "") {
-  if (!jd) return [];
-  const badStarts = [
-    "what if your next job",
-    "what if it brought",
-    "bam is where",
-    "building a sustainable tomorrow",
-    "join us in making possible",
-  ];
-
-  const parts = jd
-    .split(/\r?\n|\. +/)
-    .map((p) => p.trim())
-    .filter(Boolean)
-    .filter((p) => {
-      const lower = p.toLowerCase();
-      return !badStarts.some((b) => lower.startsWith(b));
-    });
-
-  // favour lines that look like responsibilities
-  const good = parts.filter((p) =>
-    /(data|analysis|report|power bi|sql|dashboard|stakeholder|insight|clean)/i.test(
-      p
-    )
-  );
-
-  const chosen = good.length ? good : parts;
-  return chosen.slice(0, 4);
-}
-
-// very light parser for pasted CV (optional)
+/* 2) try to pull exp / edu from pasted CV (very light) */
 function parseOldCv(oldCvText = "") {
   const text = cleanPlainText(oldCvText);
   if (!text) return { exp: [], edu: [] };
 
-  const lines = text
-    .split(/[\r\n]+/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-
+  const lines = text.split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
   const exp = [];
   const edu = [];
-  const eduKeywords =
-    /(msc|bsc|mba|master|bachelor|university|college|pgdip|diploma)/i;
+
+  const eduKeywords = /(msc|bsc|mba|master|bachelor|university|college|diploma)/i;
   const headerNoise = /(summary|profile|linkedin\.com|@|phone|gmail\.com)/i;
 
   let currentExp = null;
@@ -73,18 +35,11 @@ function parseOldCv(oldCvText = "") {
     if (headerNoise.test(line)) continue;
 
     if (eduKeywords.test(line)) {
-      edu.push({
-        degree: line,
-        institution: "",
-        year: "",
-      });
+      edu.push({ degree: line, institution: "", year: "" });
       continue;
     }
 
-    // guess job line
-    if (
-      /analyst|manager|executive|engineer|consultant|counsellor/i.test(line)
-    ) {
+    if (/analyst|manager|executive|counsellor|engineer|consultant/i.test(line)) {
       if (currentExp) exp.push(currentExp);
       currentExp = {
         title: line,
@@ -106,126 +61,70 @@ function parseOldCv(oldCvText = "") {
   return { exp, edu };
 }
 
-// create fake experience if user sent none
-function buildDefaultExperience(jdBullets = [], topSkills = "") {
-  const skillText = topSkills
-    ? topSkills.split(",").map((s) => s.trim()).filter(Boolean)
-    : [];
+/* 3) GPT: make human + tailored summary */
+async function generateSummary(profile, jd) {
+  if (!process.env.OPENAI_API_KEY) {
+    // fallback if no key
+    return `Analytical ${profile.targetTitle || "professional"} with ${
+      profile.yearsExp || "proven"
+    } experience, skilled in ${profile.topSkills || "data analysis"}, targeting UK roles.`;
+  }
 
-  const bullets = [];
+  const prompt = `
+Write a 4–5 line resume summary in UK English for:
+Name: ${profile.fullName || "the candidate"}
+Target role: ${profile.targetTitle || "Data Analyst"}
+Skills: ${profile.topSkills || "Power BI, SQL, Excel"}
 
-  // from JD
-  jdBullets.forEach((b) => {
-    bullets.push(b);
+Job description to align with:
+"""${jd}"""
+
+Requirements:
+- ATS friendly
+- confident, not salesy
+- mention results / value
+  `;
+
+  const resp = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0.7,
+  });
+  return resp.choices[0].message.content.trim();
+}
+
+/* 4) GPT: create 4–5 bullets for experience if user didn’t give any */
+async function generateExperienceBullets(profile, jd) {
+  if (!process.env.OPENAI_API_KEY) {
+    return [
+      "Cleaned and transformed datasets to support reporting.",
+      "Developed dashboards in Power BI and Excel.",
+    ];
+  }
+
+  const prompt = `
+Create 4 action-based resume bullet points for a ${
+    profile.targetTitle || "Data Analyst"
+  } role in the UK.
+Use skills: ${profile.topSkills || "data analysis"}.
+Tailor to this JD:
+"""${jd}"""
+Each bullet: start with a verb, short, specific, ATS friendly.`;
+
+  const resp = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0.7,
   });
 
-  // from skills
-  if (skillText.length) {
-    bullets.push(
-      `Built and refreshed reports/dashboards using ${skillText.join(", ")}.`
-    );
-  }
-
-  // add 1–2 generic DA bullets
-  bullets.push(
-    "Cleaned and validated incoming datasets to improve reporting accuracy."
-  );
-  bullets.push(
-    "Collaborated with stakeholders to understand data needs and present insights."
-  );
-
-  return [
-    {
-      title: "Data Analyst",
-      company: "HireEdge (Sample Project)",
-      location: "United Kingdom",
-      start: "",
-      end: "Present",
-      bullets: bullets.slice(0, 6),
-    },
-  ];
+  return resp.choices[0].message.content
+    .split("\n")
+    .map((l) => l.replace(/^[-•]\s?/, "").trim())
+    .filter(Boolean)
+    .slice(0, 5);
 }
 
-// create default education if user sent none
-function buildDefaultEducation() {
-  return [
-    {
-      degree: "MSc / BSc (Analytics / Business) – sample entry",
-      institution: "UK Institution",
-      year: "",
-    },
-  ];
-}
-
-/* ------------------ normalize request ------------------ */
-
-function normalize(body) {
-  const jd = S(body.jd);
-  const oldCvRaw =
-    body.oldCvText || body.old_cv_text || body.oldCv || body.cvText || "";
-  const oldCvText = cleanPlainText(oldCvRaw);
-
-  const profile = {
-    fullName: S(body?.profile?.fullName || body?.fullName),
-    targetTitle: S(body?.profile?.targetTitle || body?.targetTitle),
-    email: S(body?.profile?.email || body?.email),
-    phone: S(body?.profile?.phone || body?.phone),
-    linkedin: S(body?.profile?.linkedin || body?.linkedin),
-    yearsExp: S(body?.profile?.yearsExp || body?.yearsExp),
-    topSkills: S(body?.profile?.topSkills || body?.topSkills),
-  };
-
-  // experience from form
-  let experiences =
-    body?.experience ||
-    body?.experiences ||
-    body?.work_experience ||
-    body?.profile?.experiences ||
-    [];
-  if (!Array.isArray(experiences)) experiences = [];
-  experiences = experiences
-    .map((r) => ({
-      title: S(r?.title),
-      company: S(r?.company),
-      location: S(r?.location),
-      start: S(r?.start),
-      end: S(r?.end),
-      bullets: Array.isArray(r?.bullets)
-        ? r.bullets.map(S).filter(Boolean)
-        : S(r?.bullets)
-            .split("\n")
-            .map((t) => t.trim())
-            .filter(Boolean),
-    }))
-    .filter((r) => r.title || r.company || (r.bullets && r.bullets.length));
-
-  // education from form
-  let education = body?.education || body?.profile?.education || [];
-  if (!Array.isArray(education)) education = [];
-  education = education
-    .map((e) => ({
-      degree: S(e?.degree),
-      institution: S(e?.institution),
-      year: S(e?.year),
-    }))
-    .filter((e) => e.degree || e.institution || e.year);
-
-  // try to auto-fill from pasted CV
-  if (oldCvText) {
-    const { exp: parsedExp, edu: parsedEdu } = parseOldCv(oldCvText);
-    if (experiences.length === 0 && parsedExp.length) {
-      experiences = parsedExp;
-    }
-    if (education.length === 0 && parsedEdu.length) {
-      education = parsedEdu;
-    }
-  }
-
-  return { jd, oldCvText, profile, experiences, education };
-}
-
-/* ------------------ doc helpers ------------------ */
-
+/* 5) small docx helpers */
 const label = (txt) =>
   new Paragraph({
     spacing: { before: 200, after: 80 },
@@ -235,69 +134,112 @@ const label = (txt) =>
 const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
 const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
 
-/* ------------------ handler ------------------ */
-
 export default async function handler(req, res) {
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (req.method === "OPTIONS") return res.status(200).end();
+
+  if (req.method === "GET") {
+    return res.status(200).json({
+      ok: true,
+      message: "AI Resume API alive. Send POST with profile + jd.",
+    });
+  }
+
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "GET, POST, OPTIONS");
+    return res.status(405).json({ error: "Method not allowed" });
+    }
+
   try {
-    // CORS
-    res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    if (req.method === "OPTIONS") return res.status(200).end();
-
-    if (req.method === "GET") {
-      return res.status(200).json({
-        ok: true,
-        message: "HireEdge Resume API is alive ✅ send POST to get DOCX",
-      });
-    }
-
-    if (req.method !== "POST") {
-      res.setHeader("Allow", "GET, POST, OPTIONS");
-      return res.status(405).json({ error: "Method not allowed" });
-    }
-
     const body =
       typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
-    const { jd, oldCvText, profile, experiences, education } = normalize(body);
 
-    // turn JD into bullets
-    const jdBullets = extractJDBullets(jd);
+    const jd = S(body.jd);
+    const oldCvText = cleanPlainText(
+      body.oldCvText || body.old_cv_text || body.cvText || ""
+    );
 
-    // if user didn’t send experience at all → create a default DA experience
-    let finalExperiences = experiences;
-    if (!finalExperiences || finalExperiences.length === 0) {
-      finalExperiences = buildDefaultExperience(
-        jdBullets,
-        profile.topSkills || ""
-      );
+    const profile = {
+      fullName: S(body?.profile?.fullName || body?.fullName),
+      targetTitle: S(body?.profile?.targetTitle || body?.targetTitle),
+      email: S(body?.profile?.email || body?.email),
+      phone: S(body?.profile?.phone || body?.phone),
+      linkedin: S(body?.profile?.linkedin || body?.linkedin),
+      yearsExp: S(body?.profile?.yearsExp || body?.yearsExp),
+      topSkills: S(body?.profile?.topSkills || body?.topSkills),
+    };
+
+    // from form
+    let experiences =
+      body?.experience ||
+      body?.experiences ||
+      body?.profile?.experiences ||
+      [];
+    if (!Array.isArray(experiences)) experiences = [];
+    experiences = experiences
+      .map((r) => ({
+        title: S(r?.title),
+        company: S(r?.company),
+        location: S(r?.location),
+        start: S(r?.start),
+        end: S(r?.end),
+        bullets: Array.isArray(r?.bullets)
+          ? r.bullets.map(S).filter(Boolean)
+          : S(r?.bullets)
+              .split("\n")
+              .map((t) => t.trim())
+              .filter(Boolean),
+      }))
+      .filter((r) => r.title || r.company || (r.bullets && r.bullets.length));
+
+    // from form
+    let education = body?.education || body?.profile?.education || [];
+    if (!Array.isArray(education)) education = [];
+    education = education
+      .map((e) => ({
+        degree: S(e?.degree),
+        institution: S(e?.institution),
+        year: S(e?.year),
+      }))
+      .filter((e) => e.degree || e.institution || e.year);
+
+    // if user pasted old CV, try to fill gaps
+    if (oldCvText) {
+      const { exp: parsedExp, edu: parsedEdu } = parseOldCv(oldCvText);
+      if (experiences.length === 0 && parsedExp.length) {
+        experiences = parsedExp;
+      }
+      if (education.length === 0 && parsedEdu.length) {
+        education = parsedEdu;
+      }
     }
 
-    // if no education → add default
-    let finalEducation = education;
-    if (!finalEducation || finalEducation.length === 0) {
-      finalEducation = buildDefaultEducation();
-    }
+    // call GPT for summary & bullets
+    const aiSummary = await generateSummary(profile, jd);
+    const aiBullets =
+      experiences.length === 0
+        ? await generateExperienceBullets(profile, jd)
+        : [];
 
+    // start building doc
     const children = [];
 
-    // HEADER
+    // header
     if (profile.fullName) {
       children.push(
         new Paragraph({
           alignment: AlignmentType.CENTER,
           spacing: { after: 80 },
           children: [
-            new TextRun({
-              text: profile.fullName,
-              bold: true,
-              size: 40,
-            }),
+            new TextRun({ text: profile.fullName, bold: true, size: 40 }),
           ],
         })
       );
     }
-
     if (profile.targetTitle) {
       children.push(
         new Paragraph({
@@ -307,10 +249,7 @@ export default async function handler(req, res) {
         })
       );
     }
-
-    const contact = [profile.email, profile.phone, profile.linkedin].filter(
-      Boolean
-    );
+    const contact = [profile.email, profile.phone, profile.linkedin].filter(Boolean);
     if (contact.length) {
       children.push(
         new Paragraph({
@@ -321,34 +260,11 @@ export default async function handler(req, res) {
       );
     }
 
-    // PROFILE SUMMARY
+    // summary
     children.push(label("PROFILE SUMMARY"));
+    children.push(para(aiSummary));
 
-    const summaryParts = [];
-    summaryParts.push(
-      profile.targetTitle
-        ? `Analytical and detail-oriented ${profile.targetTitle}`
-        : "Analytical and detail-oriented professional"
-    );
-    if (profile.yearsExp)
-      summaryParts.push(`with ${profile.yearsExp} years’ experience`);
-    if (profile.topSkills)
-      summaryParts.push(
-        `skilled in ${profile.topSkills
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean)
-          .slice(0, 5)
-          .join(", ")}`
-      );
-    if (jdBullets.length) summaryParts.push("aligned to the attached JD");
-
-    children.push(para(summaryParts.join(", ") + "."));
-
-    // add JD bullets as “role requirements matched”
-    jdBullets.forEach((b) => children.push(bullet(b)));
-
-    // KEY SKILLS
+    // skills
     if (profile.topSkills) {
       children.push(label("KEY SKILLS"));
       children.push(
@@ -362,36 +278,55 @@ export default async function handler(req, res) {
       );
     }
 
-    // EXPERIENCE
+    // experience
     children.push(label("PROFESSIONAL EXPERIENCE"));
-    finalExperiences.forEach((r) => {
-      const head = [r.title, r.company].filter(Boolean).join(", ");
-      if (head) {
-        children.push(
-          new Paragraph({
-            spacing: { before: 120, after: 40 },
-            children: [new TextRun({ text: head, bold: true })],
-          })
-        );
-      }
-      const sub = [r.location, [r.start, r.end].filter(Boolean).join(" – ")]
-        .filter(Boolean)
-        .join("  |  ");
-      if (sub) children.push(para(sub));
+    if (experiences.length) {
+      experiences.forEach((r) => {
+        const head = [r.title, r.company].filter(Boolean).join(", ");
+        if (head) {
+          children.push(
+            new Paragraph({
+              spacing: { before: 120, after: 40 },
+              children: [new TextRun({ text: head, bold: true })],
+            })
+          );
+        }
+        const sub = [r.location, [r.start, r.end].filter(Boolean).join(" – ")]
+          .filter(Boolean)
+          .join("  |  ");
+        if (sub) children.push(para(sub));
+        (r.bullets || []).forEach((b) => children.push(bullet(b)));
+      });
+    } else {
+      // no experience in form or CV → use AI bullets
+      children.push(
+        new Paragraph({
+          spacing: { before: 120, after: 40 },
+          children: [
+            new TextRun({
+              text: profile.targetTitle || "Relevant Experience",
+              bold: true,
+            }),
+          ],
+        })
+      );
+      aiBullets.forEach((b) => children.push(bullet(b)));
+    }
 
-      (r.bullets || []).forEach((b) => children.push(bullet(b)));
-    });
-
-    // EDUCATION
+    // education
     children.push(label("EDUCATION"));
-    finalEducation.forEach((e) => {
-      const line = [e.degree, e.institution, e.year]
-        .filter(Boolean)
-        .join(", ");
-      if (line) children.push(para(line));
-    });
+    if (education.length) {
+      education.forEach((e) => {
+        const line = [e.degree, e.institution, e.year]
+          .filter(Boolean)
+          .join(", ");
+        if (line) children.push(para(line));
+      });
+    } else {
+      children.push(para("Education details available on request."));
+    }
 
-    // build document
+    // build docx
     const doc = new Document({
       sections: [
         {
@@ -417,11 +352,11 @@ export default async function handler(req, res) {
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     );
-    res.status(200).send(Buffer.from(buffer));
+    return res.status(200).send(Buffer.from(buffer));
   } catch (err) {
-    console.error("❌ Resume generation failed:", err);
-    res.status(500).json({
-      error: "Resume generation failed",
+    console.error("❌ AI resume generation failed:", err);
+    return res.status(500).json({
+      error: "AI resume generation failed",
       details: String(err?.message || err),
     });
   }
