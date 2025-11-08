@@ -1,6 +1,5 @@
 // pages/api/generate-resume.js
-// HireEdge – CV generator (paste OR upload) that PRESERVES user content,
-// aligns to JD, and outputs a UK-style modern structure.
+// HireEdge – CV generator (paste OR upload)
 
 import {
   AlignmentType,
@@ -14,30 +13,23 @@ import formidable from "formidable";
 import fs from "fs";
 import path from "path";
 
-// we lazy-import these only when an upload comes in
-let mammoth;   // for .docx
-let pdfParse;  // for .pdf
+let mammoth; // lazy for .docx
+let pdfParse; // lazy for .pdf
 
-// CORS — set to your Framer site
 const ALLOWED_ORIGIN = "https://hireedge.co.uk";
-
-// tiny helper
 const S = (v) => (v ?? "").toString().trim();
 
-// disable Next.js default body parser because we accept multipart
 export const config = {
   api: {
-    bodyParser: false,
+    bodyParser: false, // we allow multipart, so we must parse JSON ourselves
   },
 };
 
-// ============ OPENAI CLIENT ============
 function getOpenAIClient() {
   if (!process.env.OPENAI_API_KEY) return null;
   return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
-// ============ DOCX HELPERS ============
 const centerHeading = (txt, size = 32, bold = true) =>
   new Paragraph({
     alignment: AlignmentType.CENTER,
@@ -54,28 +46,20 @@ const label = (txt) =>
 const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
 const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
 
-// ============ SIMPLE CV PARSER FOR PASTED TEXT ============
-// we just split into sections – enough for your use case
+// very simple parser
 function parsePastedCv(raw = "") {
   const txt = raw.replace(/\r/g, "\n");
   const lines = txt.split("\n").map((l) => l.trim());
-  const joined = txt.toLowerCase();
 
-  // try to grab name from first line
   const fullName = lines[0] || "Candidate";
-
-  // contact line – second line usually
   const contactLine = lines[1] || "";
 
-  // split roughly
   const summaryMatch = txt.match(/summary\s*\n([\s\S]*?)(experience|education|skills)/i);
   const summaryText = summaryMatch ? summaryMatch[1].trim() : "";
 
-  // experience block
   const expMatch = txt.match(/experience\s*\n([\s\S]*?)(education|skills|profile|certifications|$)/i);
   const expText = expMatch ? expMatch[1].trim() : "";
 
-  // education block
   const eduMatch = txt.match(/education\s*\n([\s\S]*?)$/i);
   const eduText = eduMatch ? eduMatch[1].trim() : "";
 
@@ -87,8 +71,6 @@ function parsePastedCv(raw = "") {
     eduText,
   };
 }
-
-// ============ UPLOAD PARSERS ============
 
 async function readUploadedFile(file) {
   const ext = path.extname(file.originalFilename || "").toLowerCase();
@@ -110,18 +92,15 @@ async function readUploadedFile(file) {
     return data.text || "";
   }
 
-  // fallback: just read as text
   return fs.readFileSync(file.filepath, "utf8");
 }
-
-// ============ AI PROMPTS ============
 
 async function rewriteSummary({ currentSummary, jd, targetTitle }) {
   const client = getOpenAIClient();
   if (!client) {
     return (
       currentSummary ||
-      `Analytical and motivated professional targeting ${targetTitle || "the role"}.`
+      `Motivated professional aligned to ${targetTitle || "the target role"}.`
     );
   }
 
@@ -133,8 +112,7 @@ Rewrite the following candidate summary so that:
 - it reflects the job description below
 - it is 3–4 sentences
 - it is ATS-friendly
-- it mentions relevant skills only if they appear in either the CV or JD
-- tone: professional, confident, not flowery
+- tone: professional
 
 Candidate summary:
 """${currentSummary}"""
@@ -157,38 +135,24 @@ Return ONLY the rewritten summary.
 async function alignExperience({ expText, jd }) {
   const client = getOpenAIClient();
   if (!client) {
-    // fallback – keep original
-    return expText
-      .split("\n")
-      .filter(Boolean)
-      .map((l) => l.replace(/^[-•]\s?/, "").trim())
-      .slice(0, 8);
+    return expText;
   }
 
   const prompt = `
-You will receive a candidate's EXPERIENCE SECTION exactly as they pasted it into a form.
+You will receive a candidate's EXPERIENCE SECTION exactly as they pasted it.
 
 Your task:
-1. Keep every job they actually had (titles, companies, dates).
-2. For each job, rewrite or add 3–5 bullet points.
-3. Bullets must reflect the candidate's pasted experience BUT be aligned to the job description below.
-4. Do NOT invent fake employers, fake dates, or fake achievements.
-5. If the candidate seems to be sales/BD/customer-facing but the job is technical, make the bullets highlight transferable parts (stakeholder management, reporting, data capture, CRM, pipeline, process improvement).
-6. Output in this format:
+1. Keep their real jobs (titles, companies, dates).
+2. For each role, write 3–5 bullets, aligned to the job description.
+3. Do NOT invent employers or dates.
 
-Job Title | Company – Location (if any)
-MM/YYYY – MM/YYYY
-• bullet
-• bullet
-• bullet
-
-Candidate experience (original):
+Candidate experience:
 """${expText}"""
 
-Job description to align to:
+Job description:
 """${jd}"""
 
-Return ONLY the structured experience in the exact format above.
+Return ONLY the structured experience.
 `;
 
   const resp = await client.chat.completions.create({
@@ -203,21 +167,17 @@ Return ONLY the structured experience in the exact format above.
 async function buildSkills({ cvText, jd }) {
   const client = getOpenAIClient();
   if (!client) {
-    return "Stakeholder Management • Customer Service • Sales • Reporting";
+    return "Stakeholder Management • Sales • Reporting • Customer Service";
   }
 
   const prompt = `
-From the candidate CV and the job description, produce a single-row list of 10–14 skills separated by " • ".
-Rules:
-- keep skills that the candidate actually has
-- add JD skills ONLY if they are transferable
-- UK/ATS style skill names
-- no sentences, just skills
+From the candidate CV and the job description, produce 10–14 skills separated by " • ".
+Keep candidate skills, add JD skills only if transferable.
 
-Candidate CV:
+CV:
 """${cvText}"""
 
-Job description:
+JD:
 """${jd}"""
 `;
 
@@ -229,8 +189,6 @@ Job description:
 
   return resp.choices[0].message.content.trim();
 }
-
-// ============ MAIN HANDLER ============
 
 export default async function handler(req, res) {
   // CORS
@@ -249,17 +207,13 @@ export default async function handler(req, res) {
   }
 
   try {
-    // detect multipart (upload) vs json (paste)
     const contentType = req.headers["content-type"] || "";
     let cvText = "";
     let jdText = "";
     let userEmail = "";
-    let mode = "paste";
 
     if (contentType.includes("multipart/form-data")) {
-      // ==== UPLOAD MODE ====
-      mode = "upload";
-
+      // ---------- UPLOAD BRANCH ----------
       const form = formidable({ multiples: false, keepExtensions: true });
       const { fields, files } = await new Promise((resolve, reject) => {
         form.parse(req, (err, fields, files) => {
@@ -268,18 +222,27 @@ export default async function handler(req, res) {
         });
       });
 
-      const file = files.cv || files.file;
-      if (!file) {
-        return res.status(400).json({ error: "No file uploaded" });
+      // file is optional now – user may send only text
+      const file = files.cv || files.file || files.cvFile;
+      if (file) {
+        cvText = await readUploadedFile(file);
+      } else {
+        // 👇 NEW: allow CV text in multipart too
+        cvText = S(fields.cvText || fields.oldCvText || fields.pastedCv);
       }
 
-      cvText = await readUploadedFile(file);
       jdText = S(fields.jobDescription || fields.jd);
       userEmail = S(fields.email || fields.userEmail);
     } else {
-      // ==== PASTE MODE ====
-      const body =
-        typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+      // ---------- JSON BRANCH ----------
+      // 👇 NEW: manually read raw body because bodyParser is false
+      const chunks = [];
+      for await (const chunk of req) {
+        chunks.push(chunk);
+      }
+      const rawBody = Buffer.concat(chunks).toString("utf8");
+      const body = rawBody ? JSON.parse(rawBody) : {};
+
       cvText = S(body.cvText || body.oldCvText || body.pastedCv);
       jdText = S(body.jobDescription || body.jd);
       userEmail = S(body.email);
@@ -289,39 +252,32 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No CV text found" });
     }
 
-    // 1. parse pasted CV
+    // 1) parse
     const parsed = parsePastedCv(cvText);
 
-    // 2. AI: better summary
+    // 2) ai bits
     const aiSummary = await rewriteSummary({
       currentSummary: parsed.summaryText || cvText.slice(0, 500),
       jd: jdText,
       targetTitle: "",
     });
 
-    // 3. AI: experience aligned
     const alignedExperience = await alignExperience({
       expText: parsed.expText || cvText,
       jd: jdText,
     });
 
-    // 4. AI: skills line
     const skillsLine = await buildSkills({ cvText, jd: jdText });
 
-    // 5. education – keep user’s one if we parsed, else simple
     const eduBlock =
       parsed.eduText ||
-      "MSc Data Science – University of Roehampton, London (2024)\nMBA – ICFAI Business School, Bangalore (2019)\nBE Mechanical Engineering – Nandha College of Technology, Erode (2017)";
+      "Education details available on request.";
 
-    // ============ BUILD DOCX ============
+    // ---------- BUILD DOCX ----------
     const children = [];
 
-    // Name
-    children.push(
-      centerHeading(parsed.fullName || "Candidate", 40, true)
-    );
+    children.push(centerHeading(parsed.fullName || "Candidate", 40, true));
 
-    // contact line
     if (parsed.contactLine) {
       children.push(
         new Paragraph({
@@ -332,15 +288,12 @@ export default async function handler(req, res) {
       );
     }
 
-    // PROFILE SUMMARY
     children.push(label("PROFILE SUMMARY"));
     children.push(para(aiSummary));
 
-    // KEY SKILLS
     children.push(label("KEY SKILLS"));
     children.push(para(skillsLine));
 
-    // EXPERIENCE
     children.push(label("PROFESSIONAL EXPERIENCE"));
     alignedExperience
       .split("\n")
@@ -353,7 +306,6 @@ export default async function handler(req, res) {
         }
       });
 
-    // EDUCATION
     children.push(label("EDUCATION"));
     eduBlock
       .split("\n")
@@ -372,7 +324,7 @@ export default async function handler(req, res) {
     });
 
     const buffer = await Packer.toBuffer(doc);
-    const filename = `HireEdge_CV.docx`;
+    const filename = "HireEdge_CV.docx";
 
     res.setHeader(
       "Content-Disposition",
@@ -385,9 +337,8 @@ export default async function handler(req, res) {
     return res.status(200).send(Buffer.from(buffer));
   } catch (err) {
     console.error("generate-resume error:", err);
-    return res.status(500).json({
-      error: "AI resume generation failed",
-      details: String(err),
-    });
+    return res
+      .status(500)
+      .json({ error: "AI resume generation failed", details: String(err) });
   }
 }
