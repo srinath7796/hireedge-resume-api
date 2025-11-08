@@ -8,12 +8,12 @@
     "start": "next start"
   },
   "dependencies": {
-    "next": "14.2.3",
+    "next": "14.2.5",          // or whatever Vercel detected
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "openai": "^4.67.0",
     "docx": "^8.5.0",
-    "formidable": "^3.5.2",
+    "openai": "^4.67.3",
+    "formidable": "^3.5.1",
     "mammoth": "^1.6.0",
     "pdf-parse": "^1.1.1"
   }
