@@ -14,7 +14,7 @@ import formidable from "formidable";
 import fs from "fs";
 import path from "path";
 
-// we lazy-import these only when an upload comes in (to keep build small)
+// lazy imports for heavy parsers
 let mammoth;   // for .docx
 let pdfParse;  // for .pdf
 
@@ -69,7 +69,7 @@ function parsePastedCv(raw = "") {
   const expText = expMatch ? expMatch[1].trim() : "";
 
   const eduMatch = txt.match(/education\s*\n([\s\S]*?)$/i);
-  const eduText = eduMatch ? eduMatch[1].trim() : "";
+  const eduText = eduMatch ? eduText = eduMatch[1].trim() : "";
 
   return {
     fullName,
@@ -102,7 +102,7 @@ async function readUploadedFile(file) {
     return data.text || "";
   }
 
-  // fallback: try reading as utf8
+  // fallback
   return fs.readFileSync(file.filepath, "utf8");
 }
 
@@ -134,9 +134,9 @@ Job description:
 """${jd}"""
 
 Return ONLY the rewritten summary.
-`;
+  `.trim();
 
-  const resp = await client.chat completions.create({
+  const resp = await client.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [{ role: "user", content: prompt }],
     temperature: 0.35,
@@ -156,7 +156,7 @@ async function alignExperience({ expText, jd }) {
   }
 
   const prompt = `
-You will receive a candidate's EXPERIENCE SECTION exactly as they pasted it into a form.
+You will receive a candidate's EXPERIENCE SECTION exactly as they pasted it.
 
 Your task:
 1. Keep every job they actually had (titles, companies, dates).
@@ -178,7 +178,7 @@ Job description:
 """${jd}"""
 
 Return ONLY the structured experience in the exact format above.
-`;
+  `.trim();
 
   const resp = await client.chat.completions.create({
     model: "gpt-4o-mini",
@@ -208,7 +208,7 @@ Candidate CV:
 
 Job description:
 """${jd}"""
-`;
+  `.trim();
 
   const resp = await client.chat.completions.create({
     model: "gpt-4o-mini",
@@ -243,7 +243,7 @@ export default async function handler(req, res) {
     let jdText = "";
     let userEmail = "";
 
-    // ====== 1. MULTIPART (upload) ======
+    // ===== multipart (upload) =====
     if (contentType.includes("multipart/form-data")) {
       const form = formidable({ multiples: false, keepExtensions: true });
       const { fields, files } = await new Promise((resolve, reject) => {
@@ -264,8 +264,7 @@ export default async function handler(req, res) {
       jdText = S(fields.jobDescription || fields.jd);
       userEmail = S(fields.email || fields.userEmail);
     } else {
-      // ====== 2. JSON (Framer fetch) ======
-      // bodyParser is false → req.body is empty → we must read the stream
+      // ===== JSON (Framer fetch) =====
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const rawBody = Buffer.concat(chunks).toString("utf8");
@@ -280,23 +279,23 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No CV text found" });
     }
 
-    // 1. parse what we got
+    // 1. parse
     const parsed = parsePastedCv(cvText);
 
-    // 2. AI: better summary
+    // 2. AI summary
     const aiSummary = await rewriteSummary({
       currentSummary: parsed.summaryText || cvText.slice(0, 400),
       jd: jdText,
       targetTitle: "",
     });
 
-    // 3. AI: experience aligned
+    // 3. aligned experience
     const alignedExperience = await alignExperience({
       expText: parsed.expText || cvText,
       jd: jdText,
     });
 
-    // 4. AI: skills line
+    // 4. skills
     const skillsLine = await buildSkills({ cvText, jd: jdText });
 
     // 5. education
@@ -307,7 +306,7 @@ export default async function handler(req, res) {
     // ============ BUILD DOCX ============
     const children = [];
 
-    // Name (center)
+    // name
     children.push(
       centerHeading(parsed.fullName || "Candidate", 40, true)
     );
@@ -323,15 +322,15 @@ export default async function handler(req, res) {
       );
     }
 
-    // PROFILE SUMMARY
+    // profile summary
     children.push(label("PROFILE SUMMARY"));
     children.push(para(aiSummary));
 
-    // KEY SKILLS
+    // key skills
     children.push(label("KEY SKILLS"));
     children.push(para(skillsLine));
 
-    // EXPERIENCE
+    // experience
     children.push(label("PROFESSIONAL EXPERIENCE"));
     alignedExperience
       .split("\n")
@@ -344,7 +343,7 @@ export default async function handler(req, res) {
         }
       });
 
-    // EDUCATION
+    // education
     children.push(label("EDUCATION"));
     eduBlock
       .split("\n")
@@ -363,7 +362,7 @@ export default async function handler(req, res) {
     });
 
     const buffer = await Packer.toBuffer(doc);
-    const filename = `HireEdge_CV.docx`;
+    const filename = "HireEdge_CV.docx";
 
     res.setHeader(
       "Content-Disposition",
@@ -373,10 +372,10 @@ export default async function handler(req, res) {
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     );
-    return res.status(200).send(Buffer.from(buffer));
+    res.status(200).send(Buffer.from(buffer));
   } catch (err) {
     console.error("generate-resume error:", err);
-    return res.status(500).json({
+    res.status(500).json({
       error: "AI resume generation failed",
       details: String(err),
     });
