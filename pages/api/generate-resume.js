@@ -14,7 +14,7 @@ import formidable from "formidable";
 import fs from "fs";
 import path from "path";
 
-// lazy imports for heavy parsers
+// lazy imports for heavy parsers (we only load if user uploads)
 let mammoth;   // for .docx
 let pdfParse;  // for .pdf
 
@@ -59,6 +59,7 @@ function parsePastedCv(raw = "") {
   const txt = raw.replace(/\r/g, "\n");
   const lines = txt.split("\n").map((l) => l.trim());
 
+  // try to infer a few things from pasted text
   const fullName = lines[0] || "Candidate";
   const contactLine = lines[1] || "";
 
@@ -69,7 +70,7 @@ function parsePastedCv(raw = "") {
   const expText = expMatch ? expMatch[1].trim() : "";
 
   const eduMatch = txt.match(/education\s*\n([\s\S]*?)$/i);
-  const eduText = eduMatch ? eduText = eduMatch[1].trim() : "";
+  const eduText = eduMatch ? eduMatch[1].trim() : "";
 
   return {
     fullName,
@@ -102,7 +103,7 @@ async function readUploadedFile(file) {
     return data.text || "";
   }
 
-  // fallback
+  // fallback: just read as text
   return fs.readFileSync(file.filepath, "utf8");
 }
 
@@ -148,6 +149,7 @@ Return ONLY the rewritten summary.
 async function alignExperience({ expText, jd }) {
   const client = getOpenAIClient();
   if (!client) {
+    // no AI – just keep original lines
     return expText
       .split("\n")
       .filter(Boolean)
@@ -279,26 +281,26 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No CV text found" });
     }
 
-    // 1. parse
+    // 1. parse pasted CV
     const parsed = parsePastedCv(cvText);
 
-    // 2. AI summary
+    // 2. AI: better summary
     const aiSummary = await rewriteSummary({
       currentSummary: parsed.summaryText || cvText.slice(0, 400),
       jd: jdText,
       targetTitle: "",
     });
 
-    // 3. aligned experience
+    // 3. AI: experience aligned
     const alignedExperience = await alignExperience({
       expText: parsed.expText || cvText,
       jd: jdText,
     });
 
-    // 4. skills
+    // 4. AI: skills line
     const skillsLine = await buildSkills({ cvText, jd: jdText });
 
-    // 5. education
+    // 5. education – keep user’s one if we parsed, else simple
     const eduBlock =
       parsed.eduText ||
       "MSc Data Science – University of Roehampton, London (2024)\nMBA – ICFAI Business School, Bangalore (2019)\nBE Mechanical Engineering – Nandha College of Technology, Erode (2017)";
@@ -306,7 +308,7 @@ export default async function handler(req, res) {
     // ============ BUILD DOCX ============
     const children = [];
 
-    // name
+    // Name
     children.push(
       centerHeading(parsed.fullName || "Candidate", 40, true)
     );
@@ -322,15 +324,15 @@ export default async function handler(req, res) {
       );
     }
 
-    // profile summary
+    // PROFILE SUMMARY
     children.push(label("PROFILE SUMMARY"));
     children.push(para(aiSummary));
 
-    // key skills
+    // KEY SKILLS
     children.push(label("KEY SKILLS"));
     children.push(para(skillsLine));
 
-    // experience
+    // EXPERIENCE
     children.push(label("PROFESSIONAL EXPERIENCE"));
     alignedExperience
       .split("\n")
@@ -343,7 +345,7 @@ export default async function handler(req, res) {
         }
       });
 
-    // education
+    // EDUCATION
     children.push(label("EDUCATION"));
     eduBlock
       .split("\n")
