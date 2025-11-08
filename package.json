@@ -8,7 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
-    "next": "14.2.5",          // or whatever Vercel detected
+    "next": "14.2.5",          
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "docx": "^8.5.0",
