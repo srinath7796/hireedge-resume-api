@@ -1,5 +1,6 @@
 // pages/api/generate-resume.js
-// HireEdge – CV generator (paste OR upload) – cleaned output, proper bullets, JD alignment
+// HireEdge – CV generator (paste OR upload) that PRESERVES user content,
+// aligns to JD, and outputs a UK-style modern structure.
 
 import {
   AlignmentType,
@@ -13,29 +14,35 @@ import formidable from "formidable";
 import fs from "fs";
 import path from "path";
 
-let mammoth;   // lazy for .docx
-let pdfParse;  // lazy for .pdf
+// we lazy-import these only when an upload comes in (to keep build small)
+let mammoth;   // for .docx
+let pdfParse;  // for .pdf
 
+// CORS — set to your Framer site
 const ALLOWED_ORIGIN = "https://hireedge.co.uk";
+
+// tiny helper
 const S = (v) => (v ?? "").toString().trim();
 
+// disable Next.js default body parser because we accept multipart
 export const config = {
   api: {
     bodyParser: false,
   },
 };
 
-// ---------- helpers ----------
+// ============ OPENAI CLIENT ============
 function getOpenAIClient() {
   if (!process.env.OPENAI_API_KEY) return null;
   return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
-const centerHeading = (txt, size = 40) =>
+// ============ DOCX HELPERS ============
+const centerHeading = (txt, size = 32, bold = true) =>
   new Paragraph({
     alignment: AlignmentType.CENTER,
     spacing: { after: 80 },
-    children: [new TextRun({ text: txt, bold: true, size })],
+    children: [new TextRun({ text: txt, bold, size })],
   });
 
 const label = (txt) =>
@@ -47,10 +54,10 @@ const label = (txt) =>
 const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
 const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
 
-// quick-and-dirty CV splitter
+// ============ SIMPLE CV PARSER FOR PASTED TEXT ============
 function parsePastedCv(raw = "") {
   const txt = raw.replace(/\r/g, "\n");
-  const lines = txt.split("\n").map((l) => l.trim()).filter(Boolean);
+  const lines = txt.split("\n").map((l) => l.trim());
 
   const fullName = lines[0] || "Candidate";
   const contactLine = lines[1] || "";
@@ -64,80 +71,61 @@ function parsePastedCv(raw = "") {
   const eduMatch = txt.match(/education\s*\n([\s\S]*?)$/i);
   const eduText = eduMatch ? eduMatch[1].trim() : "";
 
-  return { fullName, contactLine, summaryText, expText, eduText };
+  return {
+    fullName,
+    contactLine,
+    summaryText,
+    expText,
+    eduText,
+  };
 }
 
-// upload parsers
+// ============ UPLOAD PARSERS ============
+
 async function readUploadedFile(file) {
   const ext = path.extname(file.originalFilename || "").toLowerCase();
 
   if (ext === ".docx") {
-    if (!mammoth) mammoth = (await import("mammoth")).default;
+    if (!mammoth) {
+      mammoth = (await import("mammoth")).default;
+    }
     const result = await mammoth.extractRawText({ path: file.filepath });
     return result.value || "";
   }
 
   if (ext === ".pdf") {
-    if (!pdfParse) pdfParse = (await import("pdf-parse")).default;
+    if (!pdfParse) {
+      pdfParse = (await import("pdf-parse")).default;
+    }
     const buffer = fs.readFileSync(file.filepath);
     const data = await pdfParse(buffer);
     return data.text || "";
   }
 
+  // fallback: try reading as utf8
   return fs.readFileSync(file.filepath, "utf8");
 }
 
-// remove ```markdown, ``` and leading helper sentences
-function cleanLLMText(txt = "") {
-  let t = txt.replace(/```[\s\S]*?```/g, "");    // remove fenced code
-  t = t.replace(/```markdown/gi, "");
-  t = t.replace(/```/g, "");
-  // kill prefixes like "Based on the candidate..."
-  t = t.replace(/based on the candidate.*?\n/i, "");
-  t = t.replace(/here are the transferable skills:?/i, "");
-  return t.trim();
-}
+// ============ AI PROMPTS ============
 
-// turn the LLM “experience” text into paragraphs + bullets
-function normaliseExperienceToDocx(expText = "") {
-  const lines = expText.split("\n").map((l) => l.trim()).filter(Boolean);
-  const nodes = [];
-  lines.forEach((line) => {
-    if (/^[-•]/.test(line)) {
-      nodes.push(bullet(line.replace(/^[-•]\s?/, "")));
-    } else {
-      nodes.push(para(line));
-    }
-  });
-  return nodes;
-}
-
-// shrink education to CV-style lines
-function compressEducation(eduRaw = "") {
-  const lines = eduRaw.split("\n").map((l) => l.trim()).filter(Boolean);
-  // keep first 4 lines max
-  return lines.slice(0, 6);
-}
-
-// ---------- AI prompts ----------
 async function rewriteSummary({ currentSummary, jd, targetTitle }) {
   const client = getOpenAIClient();
   if (!client) {
     return (
       currentSummary ||
-      `Motivated professional aligned to the role.`
+      `Analytical and motivated professional targeting ${targetTitle || "the role"}.`
     );
   }
 
   const prompt = `
 You are a UK CV writer.
 
-Rewrite the candidate summary so it:
-- stays TRUE to the candidate
-- clearly shows fit for this job description (sales, performance-driven, relationship building, residential / construction clients)
-- is 3–4 sentences
-- is ATS-friendly
-- no meta text
+Rewrite the following candidate summary so that:
+- it stays TRUE to the candidate
+- it reflects the job description below
+- it is 3–4 sentences
+- it is ATS-friendly
+- tone: professional, confident, not flowery
 
 Candidate summary:
 """${currentSummary}"""
@@ -145,10 +133,10 @@ Candidate summary:
 Job description:
 """${jd}"""
 
-Return only the summary.
-  `;
+Return ONLY the rewritten summary.
+`;
 
-  const resp = await client.chat.completions.create({
+  const resp = await client.chat completions.create({
     model: "gpt-4o-mini",
     messages: [{ role: "user", content: prompt }],
     temperature: 0.35,
@@ -159,33 +147,43 @@ Return only the summary.
 
 async function alignExperience({ expText, jd }) {
   const client = getOpenAIClient();
-  if (!client) return expText;
+  if (!client) {
+    return expText
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => l.replace(/^[-•]\s?/, "").trim())
+      .slice(0, 12);
+  }
 
   const prompt = `
-You will improve the candidate's EXPERIENCE section for a SALES / BUSINESS DEVELOPMENT role.
+You will receive a candidate's EXPERIENCE SECTION exactly as they pasted it into a form.
 
-Rules:
-1. KEEP all real jobs, titles, companies and dates from the candidate.
-2. For each job, write 3–5 bullets that are believable for that job.
-3. Make bullets show: relationship building, target-driven work, pipeline / reporting, dealing with homeowners/developers/contractors, presenting solutions.
-4. Align language to this job description:
-"""${jd}"""
-5. DO NOT add code fences, DO NOT say "here is".
-6. Output as plain text like:
+Your task:
+1. Keep every job they actually had (titles, companies, dates).
+2. For each job, rewrite or add 3–5 bullet points.
+3. Bullets must reflect the candidate's pasted experience BUT be aligned to the job description below.
+4. Do NOT invent fake employers, fake dates, or fake achievements.
+5. Output in this format:
 
 Job Title | Company – Location
 MM/YYYY – MM/YYYY
 • bullet
 • bullet
+• bullet
 
 Candidate experience:
 """${expText}"""
-  `;
+
+Job description:
+"""${jd}"""
+
+Return ONLY the structured experience in the exact format above.
+`;
 
   const resp = await client.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [{ role: "user", content: prompt }],
-    temperature: 0.45,
+    temperature: 0.4,
   });
 
   return resp.choices[0].message.content.trim();
@@ -194,32 +192,35 @@ Candidate experience:
 async function buildSkills({ cvText, jd }) {
   const client = getOpenAIClient();
   if (!client) {
-    return "Sales Strategy • Client Relationship Management • Pipeline Management • Customer Service • Stakeholder Liaison • Negotiation • Reporting";
+    return "Stakeholder Management • Customer Service • Sales • Reporting";
   }
 
   const prompt = `
-Create ONE line of 10–14 skills separated by " • ".
-Prioritise skills that appear in either the CV or this JD (sales, performance-based, relationship building, construction/residential clients).
+From the candidate CV and the job description, produce a single-row list of 10–14 skills separated by " • ".
+Rules:
+- keep skills that the candidate actually has
+- add JD skills ONLY if they are transferable
+- UK/ATS style skill names
+- no sentences, just skills
 
-CV:
+Candidate CV:
 """${cvText}"""
 
-JD:
+Job description:
 """${jd}"""
-
-Return ONLY the skill line.
-  `;
+`;
 
   const resp = await client.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [{ role: "user", content: prompt }],
-    temperature: 0.25,
+    temperature: 0.3,
   });
 
   return resp.choices[0].message.content.trim();
 }
 
-// ---------- handler ----------
+// ============ MAIN HANDLER ============
+
 export default async function handler(req, res) {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
@@ -229,7 +230,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   if (req.method === "GET") {
-    return res.status(200).json({ ok: true, message: "HireEdge API alive ✅" });
+    return res.status(200).json({ ok: true, message: "HireEdge API alive" });
   }
 
   if (req.method !== "POST") {
@@ -242,8 +243,8 @@ export default async function handler(req, res) {
     let jdText = "";
     let userEmail = "";
 
+    // ====== 1. MULTIPART (upload) ======
     if (contentType.includes("multipart/form-data")) {
-      // upload flow
       const form = formidable({ multiples: false, keepExtensions: true });
       const { fields, files } = await new Promise((resolve, reject) => {
         form.parse(req, (err, fields, files) => {
@@ -252,16 +253,24 @@ export default async function handler(req, res) {
         });
       });
 
-      const file = files.cv || files.cvFile || files.file;
-      if (!file) return res.status(400).json({ error: "No file uploaded" });
+      const file =
+        files.cvFile || files.cv || files.file || files.upload || null;
+
+      if (!file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
 
       cvText = await readUploadedFile(file);
       jdText = S(fields.jobDescription || fields.jd);
       userEmail = S(fields.email || fields.userEmail);
     } else {
-      // paste flow
-      const body =
-        typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+      // ====== 2. JSON (Framer fetch) ======
+      // bodyParser is false → req.body is empty → we must read the stream
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const rawBody = Buffer.concat(chunks).toString("utf8");
+      const body = rawBody ? JSON.parse(rawBody) : {};
+
       cvText = S(body.cvText || body.oldCvText || body.pastedCv);
       jdText = S(body.jobDescription || body.jd);
       userEmail = S(body.email);
@@ -271,35 +280,39 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No CV text found" });
     }
 
-    // 1. parse
+    // 1. parse what we got
     const parsed = parsePastedCv(cvText);
 
-    // 2. AI parts
+    // 2. AI: better summary
     const aiSummary = await rewriteSummary({
-      currentSummary: parsed.summaryText || cvText.slice(0, 500),
+      currentSummary: parsed.summaryText || cvText.slice(0, 400),
       jd: jdText,
       targetTitle: "",
     });
 
-    const alignedExperienceRaw = await alignExperience({
+    // 3. AI: experience aligned
+    const alignedExperience = await alignExperience({
       expText: parsed.expText || cvText,
       jd: jdText,
     });
 
-    const alignedExperience = cleanLLMText(alignedExperienceRaw);
-    const skillsLine = cleanLLMText(await buildSkills({ cvText, jd: jdText }));
+    // 4. AI: skills line
+    const skillsLine = await buildSkills({ cvText, jd: jdText });
 
-    // 3. education tidy
-    const eduLines = compressEducation(
+    // 5. education
+    const eduBlock =
       parsed.eduText ||
-        "MSc Data Science – University of Roehampton, London (2024)\nMBA – ICFAI Business School, Bangalore (2019)\nBE Mechanical Engineering – Nandha College of Technology, Erode (2017)"
-    );
+      "MSc Data Science – University of Roehampton, London (2024)\nMBA – ICFAI Business School, Bangalore (2019)\nBE Mechanical Engineering – Nandha College of Technology, Erode (2017)";
 
-    // 4. build docx
+    // ============ BUILD DOCX ============
     const children = [];
 
-    // name + contact
-    children.push(centerHeading(parsed.fullName || "Candidate", 40));
+    // Name (center)
+    children.push(
+      centerHeading(parsed.fullName || "Candidate", 40, true)
+    );
+
+    // contact line
     if (parsed.contactLine) {
       children.push(
         new Paragraph({
@@ -310,24 +323,34 @@ export default async function handler(req, res) {
       );
     }
 
-    // summary
+    // PROFILE SUMMARY
     children.push(label("PROFILE SUMMARY"));
     children.push(para(aiSummary));
 
-    // skills
+    // KEY SKILLS
     children.push(label("KEY SKILLS"));
     children.push(para(skillsLine));
 
-    // experience
+    // EXPERIENCE
     children.push(label("PROFESSIONAL EXPERIENCE"));
-    const expNodes = normaliseExperienceToDocx(alignedExperience);
-    children.push(...expNodes);
+    alignedExperience
+      .split("\n")
+      .filter(Boolean)
+      .forEach((line) => {
+        if (line.startsWith("•")) {
+          children.push(bullet(line.replace(/^•\s?/, "")));
+        } else {
+          children.push(para(line));
+        }
+      });
 
-    // education
+    // EDUCATION
     children.push(label("EDUCATION"));
-    eduLines.forEach((l) => children.push(para(l)));
+    eduBlock
+      .split("\n")
+      .filter(Boolean)
+      .forEach((line) => children.push(para(line)));
 
-    // doc
     const doc = new Document({
       sections: [
         {
@@ -340,9 +363,11 @@ export default async function handler(req, res) {
     });
 
     const buffer = await Packer.toBuffer(doc);
+    const filename = `HireEdge_CV.docx`;
+
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="${encodeURIComponent("HireEdge_CV.docx")}"`
+      `attachment; filename="${encodeURIComponent(filename)}"`
     );
     res.setHeader(
       "Content-Type",
@@ -351,8 +376,9 @@ export default async function handler(req, res) {
     return res.status(200).send(Buffer.from(buffer));
   } catch (err) {
     console.error("generate-resume error:", err);
-    return res
-      .status(500)
-      .json({ error: "AI resume generation failed", details: String(err) });
+    return res.status(500).json({
+      error: "AI resume generation failed",
+      details: String(err),
+    });
   }
 }
