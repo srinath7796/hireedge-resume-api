@@ -1,5 +1,5 @@
 // pages/api/generate-resume.js
-// HireEdge – CV generator (paste or upload) with fixed structure
+// HireEdge – CV generator (paste + upload) with robust file handling
 
 import {
   AlignmentType,
@@ -13,67 +13,61 @@ import formidable from "formidable";
 import fs from "fs";
 import path from "path";
 
-// lazy imports for heavy parsers
-let mammoth;   // .docx
-let pdfParse;  // .pdf
+let mammoth;   // for .docx
+let pdfParse;  // for .pdf
 
-// your Framer domain
+// your framer domain
 const ALLOWED_ORIGIN = "https://hireedge.co.uk";
 
-// small helpers
+// small helper
 const S = (v) => (v ?? "").toString().trim();
-const MAX_AI_CHARS = 9000; // to avoid token overflow
 
-// Next.js: disable default body parsing, we handle multipart ourselves
+// Next.js: allow multipart
 export const config = {
   api: {
     bodyParser: false,
   },
 };
 
-// ---------- OpenAI client ----------
+// ---------- OpenAI ----------
 function getOpenAIClient() {
   if (!process.env.OPENAI_API_KEY) return null;
   return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
-// ---------- text cleaners ----------
-function cleanCvText(raw = "") {
-  if (!raw) return "";
-  const lines = raw
-    .replace(/\r/g, "\n")
-    .split("\n")
-    .map((l) => l.trim());
-
-  const cleaned = lines.filter((l) => {
-    // kill lines that are just page numbers like "1", "2", "3"
-    if (/^page\s+\d+/i.test(l)) return false;
-    if (/^\d{1,3}$/.test(l)) return false;
-    return true;
+// ---------- docx helpers ----------
+const centerHeading = (txt, size = 32, bold = true) =>
+  new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: { after: 80 },
+    children: [new TextRun({ text: txt, bold, size })],
   });
 
-  return cleaned.join("\n").trim();
-}
+const label = (txt) =>
+  new Paragraph({
+    spacing: { before: 240, after: 120 },
+    children: [new TextRun({ text: txt, bold: true })],
+  });
 
-// ---------- very light parser for pasted CV ----------
+const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
+const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
+
+// ---------- parse pasted CV quickly ----------
 function parsePastedCv(raw = "") {
-  const txt = raw.replace(/\r/g, "\n");
+  const txt = raw.replace(/\r/g, "\n").trim();
   const lines = txt.split("\n").map((l) => l.trim()).filter(Boolean);
 
+  // first non-empty line is usually the name
   const fullName = lines[0] || "Candidate";
-  // try to guess a contact line: next 1–2 lines that have @ or digits
-  let contactLine = "";
-  for (let i = 1; i < Math.min(lines.length, 5); i++) {
-    if (/@/.test(lines[i]) || /\d/.test(lines[i])) {
-      contactLine = lines[i];
-      break;
-    }
-  }
 
-  const summaryMatch = txt.match(/summary\s*\n([\s\S]*?)(experience|professional experience|work history|employment|education|skills)/i);
+  // second line is often contacts
+  const contactLine = lines[1] || "";
+
+  // sections
+  const summaryMatch = txt.match(/summary\s*\n([\s\S]*?)(experience|employment|work history|education|skills|$)/i);
   const summaryText = summaryMatch ? summaryMatch[1].trim() : "";
 
-  const expMatch = txt.match(/(experience|professional experience|work history|employment)\s*\n([\s\S]*?)(education|skills|certifications|$)/i);
+  const expMatch = txt.match(/(experience|employment|work history)\s*\n([\s\S]*?)(education|skills|certifications|$)/i);
   const expText = expMatch ? expMatch[2].trim() : "";
 
   const eduMatch = txt.match(/education\s*\n([\s\S]*?)$/i);
@@ -88,64 +82,74 @@ function parsePastedCv(raw = "") {
   };
 }
 
-// ---------- upload readers ----------
-async function readUploadedFile(file) {
-  // file can be undefined if field name mismatched
-  if (!file) return "";
+// ---------- upload parsers (robust) ----------
+async function readUploadedFile(anyFile) {
+  // 1) Vercel/Formidable sometimes returns array
+  const file = Array.isArray(anyFile) ? anyFile[0] : anyFile;
+  if (!file) throw new Error("No file object received from formidable");
 
-  const ext = path.extname(file.originalFilename || "").toLowerCase();
+  // 2) try to discover actual path
+  const realPath =
+    file.filepath ||
+    file.path || // older
+    (file._writeStream && file._writeStream.path) ||
+    (file.file && file.file.filepath);
 
-  // .docx
+  if (!realPath) {
+    // we cannot read it from disk, bail out clearly
+    throw new Error("Uploaded file has no filepath on server");
+  }
+
+  const ext = path.extname(file.originalFilename || realPath || "").toLowerCase();
+
   if (ext === ".docx") {
     if (!mammoth) {
       mammoth = (await import("mammoth")).default;
     }
-    const resp = await mammoth.extractRawText({ path: file.filepath });
-    return resp.value || "";
+    const result = await mammoth.extractRawText({ path: realPath });
+    return result.value || "";
   }
 
-  // .pdf
   if (ext === ".pdf") {
     if (!pdfParse) {
       pdfParse = (await import("pdf-parse")).default;
     }
-    const buffer = fs.readFileSync(file.filepath);
+    const buffer = fs.readFileSync(realPath);
     const data = await pdfParse(buffer);
     return data.text || "";
   }
 
-  // fallback: read as text
-  return fs.readFileSync(file.filepath, "utf8");
+  // fallback: try to read as text
+  return fs.readFileSync(realPath, "utf8");
 }
 
 // ---------- AI helpers ----------
-async function aiSummary({ currentSummary, jd }) {
+async function rewriteSummary({ currentSummary, jd, targetTitle }) {
   const client = getOpenAIClient();
-  if (!client) {
-    return (
-      currentSummary ||
-      "Customer-focused professional with experience across sales, client support, and operations, now tailoring profile to the provided role."
-    );
-  }
+  const base =
+    currentSummary ||
+    `Motivated professional targeting ${targetTitle || "the role"}.`;
+
+  if (!client) return base;
+
+  // trim so we don't exceed context
+  const trimmedCv = currentSummary.slice(0, 2000);
+  const trimmedJd = jd.slice(0, 2000);
 
   const prompt = `
 You are a UK CV writer.
 
-Rewrite the following summary so that it:
-- stays true to the candidate
-- sounds suitable for the job description
-- is 3–4 sentences
-- is ATS-friendly
-- no fake achievements
+Rewrite the candidate summary so it stays true to them but aligns to this job.
+3–4 sentences. ATS-friendly. No waffle.
 
 Candidate summary:
-"""${currentSummary}"""
+"""${trimmedCv}"""
 
 Job description:
-"""${jd}"""
+"""${trimmedJd}"""
 
-Return ONLY the final summary.
-  `.trim();
+Return ONLY the summary.
+`;
 
   const resp = await client.chat.completions.create({
     model: "gpt-4o-mini",
@@ -156,23 +160,59 @@ Return ONLY the final summary.
   return resp.choices[0].message.content.trim();
 }
 
-async function aiSkills({ cvText, jd }) {
+async function alignExperience({ expText, jd }) {
   const client = getOpenAIClient();
+
+  const trimmedExp = expText.slice(0, 3500);
+  const trimmedJd = jd.slice(0, 1500);
+
   if (!client) {
-    return "Customer Service • Relationship Management • Sales Support • Communication • Stakeholder Engagement • Time Management";
+    return trimmedExp || "Experience details not available.";
   }
 
   const prompt = `
-From the candidate CV and the job description, produce ONE line of 10–14 skills separated by " • ".
-Include candidate skills first, then add relevant JD skills.
-No sentences, no numbering.
+Take the candidate experience below and rewrite it into UK-CV style.
+- KEEP the same jobs (don't invent companies / dates)
+- 3–5 bullets per job
+- bias bullets toward this job description.
 
-CV:
-"""${cvText}"""
+Candidate experience:
+"""${trimmedExp}"""
 
 Job description:
-"""${jd}"""
-  `.trim();
+"""${trimmedJd}"""
+
+Return only the formatted experience.
+`;
+
+  const resp = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0.4,
+  });
+
+  return resp.choices[0].message.content.trim();
+}
+
+async function buildSkills({ cvText, jd }) {
+  const client = getOpenAIClient();
+  if (!client) {
+    return "Customer Service • Stakeholder Management • Time Management • Problem Solving";
+  }
+
+  const trimmedCv = cvText.slice(0, 2000);
+  const trimmedJd = jd.slice(0, 1500);
+
+  const prompt = `
+Make one line of 10–14 skills separated by " • ".
+Use only skills that appear or are clearly transferable.
+
+CV:
+"""${trimmedCv}"""
+
+JD:
+"""${trimmedJd}"""
+`;
 
   const resp = await client.chat.completions.create({
     model: "gpt-4o-mini",
@@ -183,53 +223,16 @@ Job description:
   return resp.choices[0].message.content.trim();
 }
 
-async function aiExperience({ expText, jd }) {
-  const client = getOpenAIClient();
-  if (!client) {
-    return expText; // fallback
-  }
-
-  const prompt = `
-You will receive the candidate's EXPERIENCE section exactly as pasted.
-
-Rewrite it in UK CV style like:
-
-Job Title | Company – City/Country
-MM/YYYY – MM/YYYY
-• bullet
-• bullet
-
-Rules:
-- Keep the same jobs, titles, and employers (no inventions).
-- Make bullets sound more impact/achievement oriented.
-- Make them relevant to this job description:
-"""${jd}"""
-- 4–6 bullets per recent role, 2–3 for older ones.
-- Don't add page numbers or headers.
-- Return ONLY the rewritten experience.
-Original experience:
-"""${expText}"""
-  `.trim();
-
-  const resp = await client.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [{ role: "user", content: prompt }],
-    temperature: 0.45,
-  });
-
-  return resp.choices[0].message.content.trim();
-}
-
 // ---------- main handler ----------
 export default async function handler(req, res) {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method === "GET") {
-    return res.status(200).json({ ok: true, message: "HireEdge resume API alive ✅" });
+    return res.status(200).json({ ok: true, message: "HireEdge API alive" });
   }
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -240,161 +243,115 @@ export default async function handler(req, res) {
     let cvText = "";
     let jdText = "";
     let userEmail = "";
+    let mode = "paste";
 
-    // ---------- 1. multipart (upload) ----------
     if (contentType.includes("multipart/form-data")) {
+      // ---------- UPLOAD ----------
+      mode = "upload";
       const form = formidable({ multiples: false, keepExtensions: true });
 
       const { fields, files } = await new Promise((resolve, reject) => {
-        form.parse(req, (err, flds, fls) => {
+        form.parse(req, (err, fields, files) => {
           if (err) reject(err);
-          else resolve({ fields: flds, files: fls });
+          else resolve({ fields, files });
         });
       });
 
-      // try all common field names
+      // your frontend sends "cvFile"
       const uploadedFile =
-        files.cvFile || files.cv || files.file || files.upload;
+        files.cvFile ||
+        files.cv ||
+        files.file ||
+        null;
 
-      const rawText = await readUploadedFile(uploadedFile);
-      cvText = cleanCvText(rawText);
+      if (!uploadedFile) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
 
-      jdText = S(fields.jobDescription || fields.jd || "");
-      userEmail = S(fields.email || fields.userEmail || "");
+      cvText = await readUploadedFile(uploadedFile);
+      jdText = S(fields.jd || fields.jobDescription);
+      userEmail = S(fields.email);
+
     } else {
-      // ---------- 2. JSON (paste) ----------
+      // ---------- PASTE ----------
       const body =
-        typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+        typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
 
-      const rawCv =
-        body.cvText || body.oldCvText || body.pastedCv || body.text || "";
-      cvText = cleanCvText(S(rawCv));
-
-      jdText = S(body.jobDescription || body.jd || "");
-      userEmail = S(body.email || "");
+      cvText = S(body.cvText || body.oldCvText || body.pastedCv);
+      jdText = S(body.jd || body.jobDescription);
+      userEmail = S(body.email);
+      mode = S(body.mode || "paste");
     }
 
     if (!cvText) {
       return res.status(400).json({ error: "No CV text found" });
     }
 
-    // truncate for AI
-    const cvForAI = cvText.slice(0, MAX_AI_CHARS);
-    const jdForAI = jdText.slice(0, 3500);
-
-    // parse basic fields
+    // parse pasted cv
     const parsed = parsePastedCv(cvText);
 
-    // build AI pieces
-    const [summaryAI, skillsAI, expAI] = await Promise.all([
-      aiSummary({
-        currentSummary:
-          parsed.summaryText || cvForAI.slice(0, 600) || "Experienced professional.",
-        jd: jdForAI,
-      }),
-      aiSkills({ cvText: cvForAI, jd: jdForAI }),
-      aiExperience({
-        expText: parsed.expText || cvForAI,
-        jd: jdForAI,
-      }),
-    ]);
+    // AI parts
+    const aiSummary = await rewriteSummary({
+      currentSummary: parsed.summaryText || cvText.slice(0, 500),
+      jd: jdText,
+      targetTitle: "",
+    });
+
+    const alignedExp = await alignExperience({
+      expText: parsed.expText || cvText,
+      jd: jdText,
+    });
+
+    const skillsLine = await buildSkills({ cvText, jd: jdText });
 
     const eduBlock =
       parsed.eduText ||
-      "Education details available on request.";
+      "Education details as provided by the candidate.";
 
     // ---------- build DOCX ----------
     const children = [];
 
-    // name
-    children.push(
-      new Paragraph({
-        alignment: AlignmentType.CENTER,
-        spacing: { after: 40 },
-        children: [
-          new TextRun({
-            text: parsed.fullName || "Candidate",
-            bold: true,
-            size: 40,
-          }),
-        ],
-      })
-    );
+    // name at centre
+    children.push(centerHeading(parsed.fullName || "Candidate", 36, true));
 
-    // contact line
-    const contactBits = [];
-    if (parsed.contactLine) contactBits.push(parsed.contactLine);
-    if (userEmail && !parsed.contactLine?.includes(userEmail)) {
-      contactBits.push(userEmail);
-    }
-    if (contactBits.length) {
+    // contact line centre
+    if (parsed.contactLine) {
       children.push(
         new Paragraph({
           alignment: AlignmentType.CENTER,
           spacing: { after: 200 },
-          children: [new TextRun(contactBits.join(" | "))],
+          children: [new TextRun(parsed.contactLine)],
         })
       );
     }
 
     // PROFILE SUMMARY
-    children.push(
-      new Paragraph({
-        spacing: { before: 120, after: 60 },
-        children: [new TextRun({ text: "PROFILE SUMMARY", bold: true })],
-      })
-    );
-    children.push(new Paragraph(summaryAI));
+    children.push(label("PROFILE SUMMARY"));
+    children.push(para(aiSummary));
 
     // KEY SKILLS
-    children.push(
-      new Paragraph({
-        spacing: { before: 200, after: 60 },
-        children: [new TextRun({ text: "KEY SKILLS", bold: true })],
-      })
-    );
-    children.push(new Paragraph(skillsAI));
+    children.push(label("KEY SKILLS"));
+    children.push(para(skillsLine));
 
     // EXPERIENCE
-    children.push(
-      new Paragraph({
-        spacing: { before: 200, after: 60 },
-        children: [new TextRun({ text: "PROFESSIONAL EXPERIENCE", bold: true })],
-      })
-    );
-
-    // split AI experience into lines and render intelligently
-    expAI
+    children.push(label("PROFESSIONAL EXPERIENCE"));
+    alignedExp
       .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean)
+      .filter((l) => l.trim().length > 0)
       .forEach((line) => {
-        if (line.startsWith("•")) {
-          children.push(
-            new Paragraph({
-              text: line.replace(/^•\s?/, ""),
-              bullet: { level: 0 },
-            })
-          );
+        if (line.startsWith("•") || line.startsWith("-")) {
+          children.push(bullet(line.replace(/^[-•]\s?/, "").trim()));
         } else {
-          children.push(new Paragraph(line));
+          children.push(para(line));
         }
       });
 
     // EDUCATION
-    children.push(
-      new Paragraph({
-        spacing: { before: 200, after: 60 },
-        children: [new TextRun({ text: "EDUCATION", bold: true })],
-      })
-    );
+    children.push(label("EDUCATION"));
     eduBlock
       .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .forEach((line) => {
-        children.push(new Paragraph(line));
-      });
+      .filter((l) => l.trim().length > 0)
+      .forEach((line) => children.push(para(line)));
 
     const doc = new Document({
       sections: [
@@ -410,18 +367,20 @@ export default async function handler(req, res) {
     });
 
     const buffer = await Packer.toBuffer(doc);
+    const filename = "HireEdge_CV.docx";
 
     res.setHeader(
       "Content-Disposition",
-      'attachment; filename="HireEdge_CV.docx"'
+      `attachment; filename="${encodeURIComponent(filename)}"`
     );
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     );
+
     return res.status(200).send(Buffer.from(buffer));
   } catch (err) {
-    console.error("❌ AI resume generation failed:", err);
+    console.error("generate-resume error:", err);
     return res.status(500).json({
       error: "AI resume generation failed",
       details: String(err),
