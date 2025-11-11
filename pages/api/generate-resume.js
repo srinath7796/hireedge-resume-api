@@ -150,7 +150,7 @@ const label = (txt) =>
     ],
   });
 
-const para = (txt, { alignment = AlignmentType.JUSTIFIED, spacing } = {}) =>
+const para = (txt, { alignment = AlignmentType.LEFT, spacing } = {}) =>
   new Paragraph({
     alignment,
     spacing: spacing || { after: 120 },
@@ -221,17 +221,15 @@ function pushSkillLines(children, skillsLine = "") {
     return;
   }
 
-  const groupSize = skills.length > 12 ? 6 : 4;
-  for (let i = 0; i < skills.length; i += groupSize) {
-    const slice = skills.slice(i, i + groupSize).join("   •   ");
+  skills.forEach((skill) => {
     children.push(
       new Paragraph({
-        alignment: AlignmentType.LEFT,
-        spacing: { after: 80 },
-        children: [createRun(slice, { color: HEADING_COLOR })],
+        bullet: { level: 0 },
+        spacing: { after: 60 },
+        children: [createRun(skill, { color: HEADING_COLOR })],
       })
     );
-  }
+  });
 }
 
 function safeFilenameSegment(value) {
@@ -1124,7 +1122,7 @@ function pushSection(children, title, text, { treatBullets = true } = {}) {
       children.push(
         new Paragraph({
           spacing: { after: 100 },
-          alignment: AlignmentType.JUSTIFIED,
+          alignment: AlignmentType.LEFT,
           children: [createRun(line, paragraphOptions)],
         })
       );
