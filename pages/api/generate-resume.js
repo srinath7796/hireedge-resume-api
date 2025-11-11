@@ -146,6 +146,96 @@ const GITHUB_REGEX = /(?:https?:\/\/)?(?:www\.)?github\.com\/[A-Z0-9._\-\/#%]+/i
 const URL_REGEX = /https?:\/\/[^\s)]+/i;
 const LOCATION_HINT_REGEX = /\b(?:based|located|residing) in\b/i;
 
+const KEYWORD_TOKEN_REGEX = /[A-Z][A-Z0-9+#/&.-]+/gi;
+const COMMON_STOPWORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "from",
+  "this",
+  "that",
+  "into",
+  "your",
+  "their",
+  "about",
+  "have",
+  "will",
+  "skills",
+  "experience",
+  "responsibilities",
+  "requirements",
+  "job",
+  "role",
+  "team",
+  "work",
+  "ability",
+  "including",
+  "using",
+  "knowledge",
+  "strong",
+  "excellent",
+  "support",
+  "services",
+  "within",
+]);
+
+function keywordFrequencies(text = "") {
+  const counts = new Map();
+  const tokens = text.match(KEYWORD_TOKEN_REGEX) || [];
+  tokens.forEach((tokenRaw) => {
+    const token = tokenRaw.toLowerCase();
+    if (token.length < 3) return;
+    if (COMMON_STOPWORDS.has(token)) return;
+    const clean = token.replace(/^[-./]+|[-./]+$/g, "");
+    if (!clean) return;
+    counts.set(clean, (counts.get(clean) || 0) + 1);
+  });
+  return counts;
+}
+
+function deriveKeywordInsights({ cvText = "", jdText = "" }) {
+  if (!jdText.trim()) return null;
+
+  const cvCounts = keywordFrequencies(cvText);
+  const jdCounts = keywordFrequencies(jdText);
+
+  const sortedJd = Array.from(jdCounts.entries())
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1]);
+
+  const strengths = [];
+  const gaps = [];
+
+  sortedJd.forEach(([keyword]) => {
+    if (cvCounts.has(keyword)) {
+      if (strengths.length < 8) strengths.push(keyword);
+    } else if (gaps.length < 8) {
+      gaps.push(keyword);
+    }
+  });
+
+  if (strengths.length === 0 && gaps.length === 0) return null;
+
+  const summaryParts = [];
+  if (strengths.length > 0) {
+    summaryParts.push(
+      `Strong overlap with ${strengths.slice(0, 3).join(", ")}.`
+    );
+  }
+  if (gaps.length > 0) {
+    summaryParts.push(
+      `Consider weaving in evidence for ${gaps.slice(0, 3).join(", ")}.`
+    );
+  }
+
+  return {
+    matchedKeywords: strengths,
+    missingKeywords: gaps,
+    summary: summaryParts.join(" ").trim(),
+  };
+}
+
 function normaliseUrl(url) {
   if (!url) return "";
   const trimmed = url.trim();
@@ -896,6 +986,8 @@ export default async function handler(req, res) {
         ? skillsResult.value
         : "Customer Service • Stakeholder Management • Time Management • Problem Solving";
 
+    const roleInsights = deriveKeywordInsights({ cvText, jdText });
+
     const meta = {
       mode,
       targetTitle: targetTitle || null,
@@ -907,6 +999,14 @@ export default async function handler(req, res) {
       responseFormat,
       includeDocument,
     };
+
+    if (roleInsights) {
+      meta.roleInsights = {
+        summary: roleInsights.summary,
+        matchedKeywords: roleInsights.matchedKeywords.slice(0, 5),
+        missingKeywords: roleInsights.missingKeywords.slice(0, 5),
+      };
+    }
 
     try {
       res.setHeader("X-Resume-Meta", JSON.stringify(meta));
@@ -936,6 +1036,10 @@ export default async function handler(req, res) {
       languages: parsed.languagesText || "",
       interests: parsed.interestsText || "",
     };
+
+    if (roleInsights) {
+      sections.roleInsights = roleInsights;
+    }
 
     const contact = {
       name: parsed.fullName || "Candidate",
@@ -987,6 +1091,28 @@ export default async function handler(req, res) {
       children.push(label("KEY SKILLS"));
       children.push(para(skillsLine));
 
+      if (roleInsights) {
+        children.push(label("ROLE-READY INSIGHTS"));
+        if (roleInsights.summary) {
+          children.push(para(roleInsights.summary));
+        }
+        if (roleInsights.matchedKeywords.length > 0) {
+          children.push(
+            para(
+              `Strengths to spotlight: ${roleInsights.matchedKeywords
+                .slice(0, 5)
+                .join(", ")}.`
+            )
+          );
+        }
+        if (roleInsights.missingKeywords.length > 0) {
+          children.push(para("Consider adding evidence for:"));
+          roleInsights.missingKeywords.slice(0, 5).forEach((keyword) => {
+            children.push(bullet(keyword));
+          });
+        }
+      }
+
       pushSection(children, "PROFESSIONAL EXPERIENCE", alignedExp);
 
       pushSection(children, "EDUCATION", eduBlock, { treatBullets: false });
@@ -1031,6 +1157,10 @@ export default async function handler(req, res) {
         contact,
         sections,
       };
+
+      if (roleInsights) {
+        payload.insights = roleInsights;
+      }
 
       if (includeDocument && docBuffer) {
         payload.document = {
