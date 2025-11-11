@@ -31,6 +31,21 @@ const EXPOSED_HEADERS = [
   "X-Resume-Timings",
 ];
 
+function detectResponseFormat({ preferred, header }) {
+  const normalised = (preferred || "").toString().trim().toLowerCase();
+  if (normalised === "json") return "json";
+  if (normalised === "docx" || normalised === "document") return "docx";
+
+  if (
+    typeof header === "string" &&
+    header.toLowerCase().includes("application/json")
+  ) {
+    return "json";
+  }
+
+  return "docx";
+}
+
 function resolveAllowedOrigins() {
   const configured = (process.env.RESUME_API_ALLOWED_ORIGINS || "")
     .split(",")
@@ -638,6 +653,7 @@ export default async function handler(req, res) {
     let userEmail = "";
     let mode = "paste";
     let providedTitle = "";
+    let responsePreference = "";
 
     if (contentType.includes("multipart/form-data")) {
       // ---------- UPLOAD ----------
@@ -700,6 +716,9 @@ export default async function handler(req, res) {
       cvText = await readUploadedFile(uploadedFile);
       jdText = S(fields.jd || fields.jobDescription);
       userEmail = S(fields.email);
+      responsePreference = S(
+        fields.responseFormat || fields.responseType || fields.format
+      );
       providedTitle = S(
         fields.jobTitle ||
           fields.role ||
@@ -724,6 +743,12 @@ export default async function handler(req, res) {
           body.targetTitle ||
           body.position
       );
+      responsePreference = S(
+        body.responseFormat ||
+          body.responseType ||
+          body.format ||
+          body.returnFormat
+      );
     }
 
     if (!cvText) {
@@ -736,6 +761,11 @@ export default async function handler(req, res) {
           "We couldn't extract enough text from the CV. Please upload a text-based file.",
       });
     }
+
+    const responseFormat = detectResponseFormat({
+      preferred: responsePreference,
+      header: req.headers.accept,
+    });
 
     // parse pasted cv
     const parsed = parsePastedCv(cvText);
@@ -816,6 +846,7 @@ export default async function handler(req, res) {
         experienceResult.status === "fulfilled" ? "ai" : "fallback",
       skillsSource: skillsResult.status === "fulfilled" ? "ai" : "fallback",
       emailProvided: Boolean(userEmail),
+      responseFormat,
     };
 
     try {
@@ -905,12 +936,47 @@ export default async function handler(req, res) {
     });
 
     const buffer = await Packer.toBuffer(doc);
+    const docBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
     const filenameParts = ["HireEdge"];
     const nameSegment = safeFilenameSegment(parsed.fullName || "Candidate");
     const roleSegment = safeFilenameSegment(targetTitle);
     if (nameSegment) filenameParts.push(nameSegment);
     if (roleSegment) filenameParts.push(roleSegment);
     const filename = `${filenameParts.join("_")}_CV.docx`;
+
+    if (responseFormat === "json") {
+      const sections = {
+        summary: aiSummary,
+        skills: skillsLine,
+        experience: alignedExp,
+        education: eduBlock,
+        projects: projectBlock || "",
+        certifications: certBlock || "",
+        volunteer: parsed.volunteerText || "",
+        awards: parsed.awardsText || "",
+        publications: parsed.publicationsText || "",
+        professionalDevelopment: parsed.developmentText || "",
+        languages: parsed.languagesText || "",
+        interests: parsed.interestsText || "",
+      };
+
+      return res.status(200).json({
+        meta,
+        timings,
+        contact: {
+          name: parsed.fullName || "Candidate",
+          contactLine: parsed.contactLine || "",
+          targetTitle: targetTitle || "",
+        },
+        sections,
+        document: {
+          filename,
+          mimeType:
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          base64: docBuffer.toString("base64"),
+        },
+      });
+    }
 
     res.setHeader(
       "Content-Disposition",
@@ -921,7 +987,7 @@ export default async function handler(req, res) {
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     );
 
-    return res.status(200).send(Buffer.from(buffer));
+    return res.status(200).send(docBuffer);
   } catch (err) {
     console.error("generate-resume error:", err);
     return res.status(500).json({
