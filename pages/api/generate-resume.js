@@ -71,6 +71,32 @@ function resolveOriginHeader(reqOrigin) {
 // small helper
 const S = (v) => (v ?? "").toString().trim();
 
+const firstDefined = (...values) => {
+  for (const value of values) {
+    if (value !== undefined && value !== null) return value;
+  }
+  return undefined;
+};
+
+const toScalar = (value) => (Array.isArray(value) ? value[0] : value);
+
+function coerceBoolean(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const normalised = value.trim().toLowerCase();
+    if (!normalised) return null;
+    if (["true", "1", "yes", "y", "on"].includes(normalised)) return true;
+    if (["false", "0", "no", "n", "off"].includes(normalised)) return false;
+  }
+  return null;
+}
+
+function resolveBooleanPreference(value, defaultValue) {
+  const coerced = coerceBoolean(toScalar(value));
+  return coerced === null ? defaultValue : coerced;
+}
+
 // Next.js: allow multipart
 export const config = {
   api: {
@@ -654,6 +680,7 @@ export default async function handler(req, res) {
     let mode = "paste";
     let providedTitle = "";
     let responsePreference = "";
+    let includeDocumentPreference;
 
     if (contentType.includes("multipart/form-data")) {
       // ---------- UPLOAD ----------
@@ -719,6 +746,14 @@ export default async function handler(req, res) {
       responsePreference = S(
         fields.responseFormat || fields.responseType || fields.format
       );
+      includeDocumentPreference = toScalar(
+        firstDefined(
+          fields.includeDocument,
+          fields.includeDoc,
+          fields.attachDoc,
+          fields.attachDocument
+        )
+      );
       providedTitle = S(
         fields.jobTitle ||
           fields.role ||
@@ -729,8 +764,20 @@ export default async function handler(req, res) {
 
     } else {
       // ---------- PASTE ----------
-      const body =
-        typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+      let body = req.body;
+      if (typeof req.body === "string") {
+        try {
+          body = JSON.parse(req.body);
+        } catch (parseErr) {
+          return res.status(400).json({
+            error: "Invalid JSON body",
+            details: parseErr.message,
+          });
+        }
+      }
+      if (!body || typeof body !== "object") {
+        body = {};
+      }
 
       cvText = S(body.cvText || body.oldCvText || body.pastedCv);
       jdText = S(body.jd || body.jobDescription);
@@ -749,6 +796,12 @@ export default async function handler(req, res) {
           body.format ||
           body.returnFormat
       );
+      includeDocumentPreference = firstDefined(
+        body.includeDocument,
+        body.includeDoc,
+        body.attachDoc,
+        body.attachDocument
+      );
     }
 
     if (!cvText) {
@@ -766,6 +819,11 @@ export default async function handler(req, res) {
       preferred: responsePreference,
       header: req.headers.accept,
     });
+
+    const includeDocument =
+      responseFormat === "docx"
+        ? true
+        : resolveBooleanPreference(includeDocumentPreference, true);
 
     // parse pasted cv
     const parsed = parsePastedCv(cvText);
@@ -847,6 +905,7 @@ export default async function handler(req, res) {
       skillsSource: skillsResult.status === "fulfilled" ? "ai" : "fallback",
       emailProvided: Boolean(userEmail),
       responseFormat,
+      includeDocument,
     };
 
     try {
@@ -863,129 +922,140 @@ export default async function handler(req, res) {
     const projectBlock = parsed.projectsText;
     const certBlock = parsed.certificationsText;
 
-    // ---------- build DOCX ----------
-    const children = [];
+    const sections = {
+      summary: aiSummary,
+      skills: skillsLine,
+      experience: alignedExp,
+      education: eduBlock,
+      projects: projectBlock || "",
+      certifications: certBlock || "",
+      volunteer: parsed.volunteerText || "",
+      awards: parsed.awardsText || "",
+      publications: parsed.publicationsText || "",
+      professionalDevelopment: parsed.developmentText || "",
+      languages: parsed.languagesText || "",
+      interests: parsed.interestsText || "",
+    };
 
-    // name at centre
-    children.push(centerHeading(parsed.fullName || "Candidate", 36, true));
+    const contact = {
+      name: parsed.fullName || "Candidate",
+      contactLine: parsed.contactLine || "",
+      targetTitle: targetTitle || "",
+    };
 
-    if (targetTitle) {
-      children.push(
-        new Paragraph({
-          alignment: AlignmentType.CENTER,
-          spacing: { after: 120 },
-          children: [
-            new TextRun({ text: targetTitle, italics: true, size: 24 }),
-          ],
-        })
-      );
-    }
-
-    // contact line centre
-    if (parsed.contactLine) {
-      children.push(
-        new Paragraph({
-          alignment: AlignmentType.CENTER,
-          spacing: { after: 200 },
-          children: [new TextRun(parsed.contactLine)],
-        })
-      );
-    }
-
-    // PROFILE SUMMARY
-    children.push(label("PROFILE SUMMARY"));
-    children.push(para(aiSummary));
-
-    // KEY SKILLS
-    children.push(label("KEY SKILLS"));
-    children.push(para(skillsLine));
-
-    // EXPERIENCE
-    pushSection(children, "PROFESSIONAL EXPERIENCE", alignedExp);
-
-    // EDUCATION
-    pushSection(children, "EDUCATION", eduBlock, { treatBullets: false });
-
-    pushSection(children, "PROJECTS", projectBlock);
-
-    pushSection(children, "CERTIFICATIONS", certBlock, { treatBullets: false });
-    pushSection(children, "VOLUNTEER EXPERIENCE", parsed.volunteerText);
-    pushSection(children, "AWARDS", parsed.awardsText, { treatBullets: false });
-    pushSection(children, "PUBLICATIONS", parsed.publicationsText);
-    pushSection(children, "PROFESSIONAL DEVELOPMENT", parsed.developmentText, {
-      treatBullets: false,
-    });
-    pushSection(children, "LANGUAGES", parsed.languagesText, {
-      treatBullets: false,
-    });
-    pushSection(children, "INTERESTS", parsed.interestsText, {
-      treatBullets: false,
-    });
-
-    const doc = new Document({
-      sections: [
-        {
-          properties: {
-            page: {
-              margin: { top: 720, bottom: 720, left: 900, right: 900 },
-            },
-          },
-          children,
-        },
-      ],
-    });
-
-    const buffer = await Packer.toBuffer(doc);
-    const docBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
     const filenameParts = ["HireEdge"];
-    const nameSegment = safeFilenameSegment(parsed.fullName || "Candidate");
+    const nameSegment = safeFilenameSegment(contact.name);
     const roleSegment = safeFilenameSegment(targetTitle);
     if (nameSegment) filenameParts.push(nameSegment);
     if (roleSegment) filenameParts.push(roleSegment);
     const filename = `${filenameParts.join("_")}_CV.docx`;
+    const DOCX_MIME =
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+    let docBuffer = null;
+
+    if (responseFormat === "docx" || includeDocument) {
+      const children = [];
+
+      children.push(centerHeading(contact.name, 36, true));
+
+      if (targetTitle) {
+        children.push(
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            spacing: { after: 120 },
+            children: [
+              new TextRun({ text: targetTitle, italics: true, size: 24 }),
+            ],
+          })
+        );
+      }
+
+      if (contact.contactLine) {
+        children.push(
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            spacing: { after: 200 },
+            children: [new TextRun(contact.contactLine)],
+          })
+        );
+      }
+
+      children.push(label("PROFILE SUMMARY"));
+      children.push(para(aiSummary));
+
+      children.push(label("KEY SKILLS"));
+      children.push(para(skillsLine));
+
+      pushSection(children, "PROFESSIONAL EXPERIENCE", alignedExp);
+
+      pushSection(children, "EDUCATION", eduBlock, { treatBullets: false });
+
+      pushSection(children, "PROJECTS", projectBlock);
+
+      pushSection(children, "CERTIFICATIONS", certBlock, { treatBullets: false });
+      pushSection(children, "VOLUNTEER EXPERIENCE", parsed.volunteerText);
+      pushSection(children, "AWARDS", parsed.awardsText, { treatBullets: false });
+      pushSection(children, "PUBLICATIONS", parsed.publicationsText);
+      pushSection(children, "PROFESSIONAL DEVELOPMENT", parsed.developmentText, {
+        treatBullets: false,
+      });
+      pushSection(children, "LANGUAGES", parsed.languagesText, {
+        treatBullets: false,
+      });
+      pushSection(children, "INTERESTS", parsed.interestsText, {
+        treatBullets: false,
+      });
+
+      const doc = new Document({
+        sections: [
+          {
+            properties: {
+              page: {
+                margin: { top: 720, bottom: 720, left: 900, right: 900 },
+              },
+            },
+            children,
+          },
+        ],
+      });
+
+      const buffer = await Packer.toBuffer(doc);
+      docBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+    }
 
     if (responseFormat === "json") {
-      const sections = {
-        summary: aiSummary,
-        skills: skillsLine,
-        experience: alignedExp,
-        education: eduBlock,
-        projects: projectBlock || "",
-        certifications: certBlock || "",
-        volunteer: parsed.volunteerText || "",
-        awards: parsed.awardsText || "",
-        publications: parsed.publicationsText || "",
-        professionalDevelopment: parsed.developmentText || "",
-        languages: parsed.languagesText || "",
-        interests: parsed.interestsText || "",
-      };
-
-      return res.status(200).json({
+      const payload = {
         meta,
         timings,
-        contact: {
-          name: parsed.fullName || "Candidate",
-          contactLine: parsed.contactLine || "",
-          targetTitle: targetTitle || "",
-        },
+        contact,
         sections,
-        document: {
+      };
+
+      if (includeDocument && docBuffer) {
+        payload.document = {
           filename,
-          mimeType:
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          mimeType: DOCX_MIME,
           base64: docBuffer.toString("base64"),
-        },
-      });
+        };
+      } else if (!includeDocument) {
+        payload.document = null;
+      }
+
+      return res.status(200).json(payload);
+    }
+
+    if (!docBuffer) {
+      return res
+        .status(500)
+        .json({ error: "Resume document generation failed" });
     }
 
     res.setHeader(
       "Content-Disposition",
       `attachment; filename="${encodeURIComponent(filename)}"`
     );
-    res.setHeader(
-      "Content-Type",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    );
+    res.setHeader("Content-Type", DOCX_MIME);
 
     return res.status(200).send(docBuffer);
   } catch (err) {
