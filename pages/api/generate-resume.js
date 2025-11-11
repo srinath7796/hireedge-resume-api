@@ -25,6 +25,12 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://127.0.0.1:3000",
 ];
 
+const EXPOSED_HEADERS = [
+  "Content-Disposition",
+  "X-Resume-Meta",
+  "X-Resume-Timings",
+];
+
 function resolveAllowedOrigins() {
   const configured = (process.env.RESUME_API_ALLOWED_ORIGINS || "")
     .split(",")
@@ -80,9 +86,54 @@ const label = (txt) =>
 const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
 const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
 
+function safeFilenameSegment(value) {
+  return (value || "")
+    .normalize("NFKD")
+    .replace(/[^\w\s-]+/g, "")
+    .trim()
+    .split(/\s+/)
+    .slice(0, 4)
+    .join("_")
+    .replace(/_+/g, "_");
+}
+
 // ---------- parse pasted CV quickly ----------
 const EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE_REGEX = /(?:(?:\+?\d{1,3}[\s-]?)?(?:\(\d{1,4}\)[\s-]?)?\d{3,4}[\s-]?\d{3,4}[\s-]?\d{0,4})/;
+const LINKEDIN_REGEX = /(?:https?:\/\/)?(?:www\.)?linkedin\.com\/[A-Z0-9._\-\/#%]+/i;
+const GITHUB_REGEX = /(?:https?:\/\/)?(?:www\.)?github\.com\/[A-Z0-9._\-\/#%]+/i;
+const URL_REGEX = /https?:\/\/[^\s)]+/i;
+const LOCATION_HINT_REGEX = /\b(?:based|located|residing) in\b/i;
+
+function normaliseUrl(url) {
+  if (!url) return "";
+  const trimmed = url.trim();
+  if (!trimmed) return "";
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed.replace(/\/$/, "");
+  }
+  return `https://${trimmed.replace(/\/$/, "")}`;
+}
+
+function formatContactUrl(url, label) {
+  const normalised = normaliseUrl(url);
+  if (!normalised) return "";
+  const display = normalised
+    .replace(/^https?:\/\//i, "")
+    .replace(/^www\./i, "")
+    .replace(/\/$/, "");
+  return label ? `${label}: ${display}` : display;
+}
+
+function isLikelyLocation(line) {
+  const candidate = (line || "").trim();
+  if (!candidate) return false;
+  if (candidate.length > 64) return false;
+  if (EMAIL_REGEX.test(candidate)) return false;
+  if (URL_REGEX.test(candidate)) return false;
+  if (/\d{3,}/.test(candidate)) return false;
+  return candidate.includes(",") || LOCATION_HINT_REGEX.test(candidate);
+}
 
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -127,20 +178,63 @@ function parsePastedCv(raw = "") {
     topLines.push(line);
   }
 
-  const contactPieces = new Set();
-  if (emailMatch) contactPieces.add(emailMatch[0]);
+  const contactOrdered = [];
+  const contactSeen = new Set();
+  const addContact = (value) => {
+    const clean = (value || "").replace(/\s+/g, " ").trim();
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    if (contactSeen.has(key)) return;
+    contactSeen.add(key);
+    contactOrdered.push(clean);
+  };
+
+  if (emailMatch) addContact(emailMatch[0]);
   if (phoneMatch) {
     const digits = phoneMatch[0].replace(/\D/g, "");
     if (digits.length >= 7) {
-      contactPieces.add(phoneMatch[0]);
+      addContact(phoneMatch[0]);
     }
   }
-  topLines
-    .filter((line) => line && line !== fullName && !contactPieces.has(line))
-    .slice(0, 2)
-    .forEach((line) => contactPieces.add(line));
 
-  const contactLine = Array.from(contactPieces).join(" • ");
+  const topWindow = lines.slice(0, 12);
+  for (const line of topWindow) {
+    if (!line) continue;
+    if (line === fullName) continue;
+
+    const linkedInMatch = line.match(LINKEDIN_REGEX);
+    if (linkedInMatch) {
+      addContact(formatContactUrl(linkedInMatch[0], "LinkedIn"));
+      continue;
+    }
+
+    const githubMatch = line.match(GITHUB_REGEX);
+    if (githubMatch) {
+      addContact(formatContactUrl(githubMatch[0], "GitHub"));
+      continue;
+    }
+
+    const genericUrlMatch = line.match(URL_REGEX);
+    if (genericUrlMatch) {
+      const labelled = /portfolio|site|blog|profile|website/i.test(line)
+        ? formatContactUrl(genericUrlMatch[0], "Portfolio")
+        : formatContactUrl(genericUrlMatch[0]);
+      addContact(labelled);
+      continue;
+    }
+
+    if (isLikelyLocation(line)) {
+      addContact(line);
+      continue;
+    }
+  }
+
+  topLines
+    .filter((line) => line && line !== fullName)
+    .slice(0, 2)
+    .forEach((line) => addContact(line));
+
+  const contactLine = contactOrdered.join(" • ");
 
   const summaryText = extractSection(txt, [
     "summary",
@@ -198,6 +292,23 @@ function parsePastedCv(raw = "") {
     ["skills", "projects", "volunteer", "interests"]
   );
 
+  const publicationsText = extractSection(
+    txt,
+    ["publications", "research", "papers", "articles"],
+    ["skills", "projects", "volunteer", "awards", "interests"]
+  );
+
+  const developmentText = extractSection(
+    txt,
+    [
+      "professional development",
+      "development",
+      "continuing education",
+      "learning",
+    ],
+    ["skills", "projects", "certifications", "training", "interests"]
+  );
+
   const languagesText = extractSection(
     txt,
     ["languages", "language skills"],
@@ -220,6 +331,8 @@ function parsePastedCv(raw = "") {
     certificationsText,
     volunteerText,
     awardsText,
+    publicationsText,
+    developmentText,
     languagesText,
     interestsText,
   };
@@ -310,6 +423,13 @@ async function runWithTimeout(task, { ms, label }) {
           reject(err);
         }
       );
+  });
+}
+
+function timedRun({ key, timeoutLabel, timeoutMs, task, timings }) {
+  const startedAt = Date.now();
+  return runWithTimeout(task, { ms: timeoutMs, label: timeoutLabel }).finally(() => {
+    timings[key] = Date.now() - startedAt;
   });
 }
 
@@ -495,6 +615,10 @@ export default async function handler(req, res) {
     "Access-Control-Allow-Headers",
     ["Content-Type", "Authorization", "X-Requested-With"].join(", ")
   );
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    EXPOSED_HEADERS.join(", ")
+  );
   res.setHeader("Access-Control-Max-Age", "86400");
   res.setHeader("Vary", "Origin");
   res.setHeader("Cache-Control", "no-store");
@@ -625,28 +749,38 @@ export default async function handler(req, res) {
     const summaryFallback = parsed.summaryText || cvText.slice(0, 500);
     const experienceFallback = parsed.expText || cvText;
 
+    const timings = {};
     const [summaryResult, experienceResult, skillsResult] = await Promise.allSettled([
-      runWithTimeout(
-        () =>
+      timedRun({
+        key: "summaryMs",
+        timeoutLabel: "Summary rewrite",
+        timeoutMs: 15000,
+        task: () =>
           rewriteSummary({
             currentSummary: summaryFallback,
             jd: jdText,
             targetTitle,
           }),
-        { ms: 15000, label: "Summary rewrite" }
-      ),
-      runWithTimeout(
-        () =>
+        timings,
+      }),
+      timedRun({
+        key: "experienceMs",
+        timeoutLabel: "Experience alignment",
+        timeoutMs: 20000,
+        task: () =>
           alignExperience({
             expText: experienceFallback,
             jd: jdText,
           }),
-        { ms: 20000, label: "Experience alignment" }
-      ),
-      runWithTimeout(
-        () => buildSkills({ cvText, jd: jdText }),
-        { ms: 10000, label: "Skills extraction" }
-      ),
+        timings,
+      }),
+      timedRun({
+        key: "skillsMs",
+        timeoutLabel: "Skills extraction",
+        timeoutMs: 10000,
+        task: () => buildSkills({ cvText, jd: jdText }),
+        timings,
+      }),
     ]);
 
     if (summaryResult.status === "rejected") {
@@ -673,6 +807,23 @@ export default async function handler(req, res) {
       skillsResult.status === "fulfilled"
         ? skillsResult.value
         : "Customer Service • Stakeholder Management • Time Management • Problem Solving";
+
+    const meta = {
+      mode,
+      targetTitle: targetTitle || null,
+      summarySource: summaryResult.status === "fulfilled" ? "ai" : "fallback",
+      experienceSource:
+        experienceResult.status === "fulfilled" ? "ai" : "fallback",
+      skillsSource: skillsResult.status === "fulfilled" ? "ai" : "fallback",
+      emailProvided: Boolean(userEmail),
+    };
+
+    try {
+      res.setHeader("X-Resume-Meta", JSON.stringify(meta));
+      res.setHeader("X-Resume-Timings", JSON.stringify(timings));
+    } catch (serialiseErr) {
+      console.warn("Unable to serialise resume metadata", serialiseErr);
+    }
 
     const eduBlock =
       parsed.eduText ||
@@ -729,6 +880,10 @@ export default async function handler(req, res) {
     pushSection(children, "CERTIFICATIONS", certBlock, { treatBullets: false });
     pushSection(children, "VOLUNTEER EXPERIENCE", parsed.volunteerText);
     pushSection(children, "AWARDS", parsed.awardsText, { treatBullets: false });
+    pushSection(children, "PUBLICATIONS", parsed.publicationsText);
+    pushSection(children, "PROFESSIONAL DEVELOPMENT", parsed.developmentText, {
+      treatBullets: false,
+    });
     pushSection(children, "LANGUAGES", parsed.languagesText, {
       treatBullets: false,
     });
@@ -750,7 +905,12 @@ export default async function handler(req, res) {
     });
 
     const buffer = await Packer.toBuffer(doc);
-    const filename = "HireEdge_CV.docx";
+    const filenameParts = ["HireEdge"];
+    const nameSegment = safeFilenameSegment(parsed.fullName || "Candidate");
+    const roleSegment = safeFilenameSegment(targetTitle);
+    if (nameSegment) filenameParts.push(nameSegment);
+    if (roleSegment) filenameParts.push(roleSegment);
+    const filename = `${filenameParts.join("_")}_CV.docx`;
 
     res.setHeader(
       "Content-Disposition",
