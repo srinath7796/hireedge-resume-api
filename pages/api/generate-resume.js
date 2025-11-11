@@ -411,6 +411,79 @@ function isLikelyLocation(line) {
   return candidate.includes(",") || LOCATION_HINT_REGEX.test(candidate);
 }
 
+function selectFullNameCandidate(lines = []) {
+  const candidates = [];
+  const limit = Math.min(lines.length, 40);
+
+  for (let index = 0; index < limit; index += 1) {
+    const original = lines[index];
+    const line = (original || "").replace(/\s+/g, " ").trim();
+    if (!line) continue;
+    if (line.length > 80) continue;
+    if (EMAIL_REGEX.test(line)) continue;
+    if (URL_REGEX.test(line)) continue;
+    if (isLikelyLocation(line)) continue;
+    if (/^\d+[).:-]?$/.test(line)) continue;
+
+    const letterMatches = line.match(/[A-Za-z]/g) || [];
+    if (letterMatches.length < 3) continue;
+
+    const digitMatches = line.match(/\d/g) || [];
+    if (digitMatches.length > 0) continue;
+
+    const wordCount = line.split(/\s+/).filter(Boolean).length;
+    let score = Math.max(0, 16 - index * 2);
+
+    if (wordCount >= 2) score += 10;
+    if (/[A-Z][a-z]+/.test(line)) score += 4;
+    if (/[a-z]/.test(line)) score += 2;
+    if (/['-]/.test(line)) score += 1;
+
+    const allCapsLetters =
+      letterMatches.length > 0 && line === line.toUpperCase();
+    if (allCapsLetters) score -= 6;
+
+    if (/summary|objective|profile|curriculum|experience/i.test(line)) {
+      score -= 20;
+    }
+
+    candidates.push({ value: line, score });
+  }
+
+  if (candidates.length === 0) {
+    const fallback = lines.find((original) => {
+      const line = (original || "").replace(/\s+/g, " ").trim();
+      if (!line) return false;
+      if (line.length > 80) return false;
+      if (EMAIL_REGEX.test(line) || URL_REGEX.test(line)) return false;
+      if (isLikelyLocation(line)) return false;
+      if (/^\d+[).:-]?$/.test(line)) return false;
+      if (/summary|objective|profile|curriculum|experience/i.test(line)) {
+        return false;
+      }
+      const letters = line.match(/[A-Za-z]/g) || [];
+      const digits = line.match(/\d/g) || [];
+      if (digits.length > 0) return false;
+      return letters.length >= 3;
+    });
+    return fallback || "Candidate";
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  const [topCandidate] = candidates;
+  if (!topCandidate) {
+    return "Candidate";
+  }
+
+  if (topCandidate.score <= 0) {
+    const positive = candidates.find((candidate) => candidate.score > 0);
+    if (positive) return positive.value;
+    return "Candidate";
+  }
+
+  return topCandidate.value;
+}
+
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -439,14 +512,7 @@ function parsePastedCv(raw = "") {
   const emailMatch = txt.match(EMAIL_REGEX);
   const phoneMatch = txt.match(PHONE_REGEX);
 
-  const fullName =
-    nonEmptyLines.find((line) => {
-      if (!line) return false;
-      if (line.length > 80) return false;
-      if (EMAIL_REGEX.test(line)) return false;
-      if (/\d/.test(line)) return false;
-      return true;
-    }) || "Candidate";
+  const fullName = selectFullNameCandidate(nonEmptyLines);
 
   const topLines = [];
   for (const line of lines) {
@@ -459,6 +525,10 @@ function parsePastedCv(raw = "") {
   const addContact = (value) => {
     const clean = (value || "").replace(/\s+/g, " ").trim();
     if (!clean) return;
+    if (/^\d+[).:-]?$/.test(clean)) return;
+    const hasLetters = /[A-Za-z]/.test(clean);
+    const hasDigits = /\d/.test(clean);
+    if (!hasLetters && hasDigits) return;
     const key = clean.toLowerCase();
     if (contactSeen.has(key)) return;
     contactSeen.add(key);
