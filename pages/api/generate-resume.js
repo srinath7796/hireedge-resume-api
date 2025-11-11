@@ -343,6 +343,46 @@ function deriveKeywordInsights({ cvText = "", jdText = "" }) {
   };
 }
 
+function extractMetricPhrase(text = "") {
+  if (!text) return "";
+  const metricMatch = text.match(
+    /(£\s?\d+[\d,]*|\d+%|\d+\s?(?:x|times)|\d+[\d,]*\s?(?:customers|users|clients|people))/i
+  );
+  return metricMatch ? metricMatch[0].trim() : "";
+}
+
+function fallbackImpactHighlights(source = "") {
+  const lines = (source || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    return [
+      {
+        headline: "Showcase one quantifiable achievement that proves your impact.",
+        metric: "",
+        proof:
+          "Highlight a project where you delivered measurable results to stand out.",
+      },
+    ];
+  }
+
+  const priorityLines = lines.filter((line) => looksLikeBullet(line) || /\d/.test(line));
+  const chosen = (priorityLines.length > 0 ? priorityLines : lines)
+    .map((line) => line.replace(/^[•\-]\s*/, ""))
+    .slice(0, 3);
+
+  return chosen.map((headline, index) => ({
+    headline,
+    metric: extractMetricPhrase(headline),
+    proof:
+      index === 0
+        ? "Frame this as a results-first bullet so hiring managers see your value instantly."
+        : "Tie this story back to the employer's priorities for even more impact.",
+  }));
+}
+
 function normaliseUrl(url) {
   if (!url) return "";
   const trimmed = url.trim();
@@ -876,6 +916,118 @@ async function buildOutreachKit({ cvText, jd, targetTitle }) {
   }
 }
 
+async function buildImpactHighlights({ cvText, expText, jd, targetTitle }) {
+  const fallbackHighlights = fallbackImpactHighlights(expText || cvText || "");
+  const fallback = { highlights: fallbackHighlights, __source: "fallback" };
+  const client = getOpenAIClient();
+
+  if (!client) return fallback;
+
+  const trimmedExp = (expText || cvText || "").slice(0, 3500);
+  const trimmedJd = (jd || "").slice(0, 1800);
+
+  try {
+    const response = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.35,
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "impact_highlights",
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["highlights"],
+            properties: {
+              highlights: {
+                type: "array",
+                minItems: 1,
+                maxItems: 3,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["headline"],
+                  properties: {
+                    headline: {
+                      type: "string",
+                      description:
+                        "Short achievement statement written in first person past tense.",
+                    },
+                    metric: {
+                      type: "string",
+                      description:
+                        "Quantifiable figure or evidence that proves the impact (e.g. 35% uplift).",
+                    },
+                    proof: {
+                      type: "string",
+                      description:
+                        "One sentence coaching tip on how to frame or expand this story.",
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      messages: [
+        {
+          role: "user",
+          content: [
+            "You create impact snapshots for CVs.",
+            targetTitle
+              ? `Highlight achievements that support the ${targetTitle} role.`
+              : "Highlight achievements that prove seniority and measurable results.",
+            "Return 2-3 concise highlights ordered by strength.",
+            "Use numbers only when they appear or are strongly implied.",
+            "",
+            "Candidate experience:",
+            `"""${trimmedExp}"""`,
+            "",
+            "Job description (for context):",
+            `"""${trimmedJd}"""`,
+          ].join("\n"),
+        },
+      ],
+    });
+
+    const content = response.choices?.[0]?.message?.content;
+    if (!content) return fallback;
+
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch (err) {
+      console.warn("Impact highlight JSON parse failed", err);
+      return fallback;
+    }
+
+    const rawHighlights = Array.isArray(parsed.highlights)
+      ? parsed.highlights
+      : [];
+    if (rawHighlights.length === 0) {
+      return fallback;
+    }
+
+    const sanitised = rawHighlights
+      .map((item) => ({
+        headline: S(item.headline),
+        metric: S(item.metric),
+        proof: S(item.proof),
+      }))
+      .filter((item) => item.headline);
+
+    if (sanitised.length === 0) {
+      return fallback;
+    }
+
+    return { highlights: sanitised.slice(0, 3), __source: "ai" };
+  } catch (err) {
+    console.warn("Impact highlight generation failed", err);
+    return fallback;
+  }
+}
+
 function cleanTargetTitle(value = "") {
   return value.replace(/\s+/g, " ").replace(/[.,;:]+$/, "").trim();
 }
@@ -1176,6 +1328,10 @@ export default async function handler(req, res) {
       ...defaultOutreachKit(targetTitle),
       __source: "fallback",
     };
+    const impactFallback = {
+      highlights: fallbackImpactHighlights(experienceFallback),
+      __source: "fallback",
+    };
 
     const timings = {};
     const [
@@ -1183,6 +1339,7 @@ export default async function handler(req, res) {
       experienceResult,
       skillsResult,
       outreachResult,
+      impactResult,
     ] = await Promise.allSettled([
       timedRun({
         key: "summaryMs",
@@ -1221,6 +1378,19 @@ export default async function handler(req, res) {
         task: () => buildOutreachKit({ cvText, jd: jdText, targetTitle }),
         timings,
       }),
+      timedRun({
+        key: "impactMs",
+        timeoutLabel: "Impact highlights",
+        timeoutMs: 12000,
+        task: () =>
+          buildImpactHighlights({
+            cvText,
+            expText: experienceFallback,
+            jd: jdText,
+            targetTitle,
+          }),
+        timings,
+      }),
     ]);
 
     if (summaryResult.status === "rejected") {
@@ -1234,6 +1404,9 @@ export default async function handler(req, res) {
     }
     if (outreachResult.status === "rejected") {
       console.warn("Outreach kit AI failed", outreachResult.reason);
+    }
+    if (impactResult.status === "rejected") {
+      console.warn("Impact highlights AI failed", impactResult.reason);
     }
 
     const aiSummary =
@@ -1263,6 +1436,19 @@ export default async function handler(req, res) {
         ? "ai"
         : "fallback";
 
+    const impactInternal =
+      impactResult.status === "fulfilled" && impactResult.value
+        ? impactResult.value
+        : impactFallback;
+
+    const { __source: impactInternalSource, highlights: impactHighlights } =
+      impactInternal;
+
+    const impactSource =
+      impactResult.status === "fulfilled" && impactInternalSource === "ai"
+        ? "ai"
+        : "fallback";
+
     const roleInsights = deriveKeywordInsights({ cvText, jdText });
 
     const meta = {
@@ -1273,6 +1459,7 @@ export default async function handler(req, res) {
         experienceResult.status === "fulfilled" ? "ai" : "fallback",
       skillsSource: skillsResult.status === "fulfilled" ? "ai" : "fallback",
       outreachSource,
+      impactSource,
       emailProvided: Boolean(userEmail),
       responseFormat,
       includeDocument,
@@ -1314,6 +1501,7 @@ export default async function handler(req, res) {
       languages: parsed.languagesText || "",
       interests: parsed.interestsText || "",
       outreachKit,
+      impactHighlights,
     };
 
     if (roleInsights) {
@@ -1392,6 +1580,23 @@ export default async function handler(req, res) {
             children.push(bullet(keyword));
           });
         }
+      }
+
+      if (impactHighlights && impactHighlights.length > 0) {
+        children.push(label("IMPACT HIGHLIGHTS"));
+        impactHighlights.forEach((highlight) => {
+          const metricPrefix = highlight.metric
+            ? `${highlight.metric}: `
+            : "";
+          children.push(
+            bullet(`${metricPrefix}${highlight.headline}`.trim())
+          );
+          if (highlight.proof) {
+            children.push(
+              para(highlight.proof, { alignment: AlignmentType.LEFT })
+            );
+          }
+        });
       }
 
       if (outreachKit) {
@@ -1492,6 +1697,8 @@ export default async function handler(req, res) {
       };
 
       payload.outreachKit = outreachKit;
+      payload.impactHighlights = impactHighlights;
+      payload.impactHighlightsSource = impactSource;
 
       if (roleInsights) {
         payload.insights = roleInsights;
