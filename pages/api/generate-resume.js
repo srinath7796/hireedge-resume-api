@@ -17,7 +17,13 @@ let mammoth;   // for .docx
 let pdfParse;  // for .pdf
 
 // ---------- CORS ----------
-const DEFAULT_ALLOWED_ORIGINS = ["https://hireedge.co.uk"];
+const DEFAULT_ALLOWED_ORIGINS = [
+  "https://hireedge.co.uk",
+  "https://www.hireedge.co.uk",
+  "https://app.hireedge.co.uk",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+];
 
 function resolveAllowedOrigins() {
   const configured = (process.env.RESUME_API_ALLOWED_ORIGINS || "")
@@ -25,7 +31,12 @@ function resolveAllowedOrigins() {
     .map((origin) => origin.trim())
     .filter(Boolean);
 
-  return configured.length > 0 ? configured : DEFAULT_ALLOWED_ORIGINS;
+  const combined =
+    configured.length > 0
+      ? [...configured, ...DEFAULT_ALLOWED_ORIGINS]
+      : DEFAULT_ALLOWED_ORIGINS;
+
+  return Array.from(new Set(combined));
 }
 
 const ALLOWED_ORIGINS = resolveAllowedOrigins();
@@ -175,6 +186,30 @@ function parsePastedCv(raw = "") {
     ["skills", "projects", "volunteer", "awards"]
   );
 
+  const volunteerText = extractSection(
+    txt,
+    ["volunteer", "volunteering", "community"],
+    ["skills", "awards", "interests", "hobbies"]
+  );
+
+  const awardsText = extractSection(
+    txt,
+    ["awards", "honours", "honors", "recognition"],
+    ["skills", "projects", "volunteer", "interests"]
+  );
+
+  const languagesText = extractSection(
+    txt,
+    ["languages", "language skills"],
+    ["skills", "projects", "interests", "hobbies"]
+  );
+
+  const interestsText = extractSection(
+    txt,
+    ["interests", "hobbies", "additional information"],
+    ["references", "appendix", "referees"]
+  );
+
   return {
     fullName,
     contactLine,
@@ -183,6 +218,10 @@ function parsePastedCv(raw = "") {
     eduText,
     projectsText,
     certificationsText,
+    volunteerText,
+    awardsText,
+    languagesText,
+    interestsText,
   };
 }
 
@@ -290,7 +329,9 @@ async function rewriteSummary({ currentSummary, jd, targetTitle }) {
     "You are a UK CV writer.",
     "",
     "Rewrite the candidate summary so it stays true to them but aligns to this job.",
-    "3-4 sentences. ATS-friendly. No waffle.",
+    targetTitle
+      ? `3-4 sentences. ATS-friendly. Reference the ${targetTitle} role explicitly.`
+      : "3-4 sentences. ATS-friendly. No waffle.",
     "",
     "Candidate summary:",
     `"""${trimmedCv}"""`,
@@ -373,6 +414,77 @@ async function buildSkills({ cvText, jd }) {
   return resp.choices[0].message.content.trim();
 }
 
+function cleanTargetTitle(value = "") {
+  return value.replace(/\s+/g, " ").replace(/[.,;:]+$/, "").trim();
+}
+
+function inferTargetTitle({
+  explicit,
+  jd,
+  cv,
+}) {
+  const explicitClean = cleanTargetTitle(explicit);
+  if (explicitClean) return explicitClean;
+
+  const tryMatch = (pattern) => {
+    if (!jd) return "";
+    const match = jd.match(pattern);
+    if (!match) return "";
+    return cleanTargetTitle(match[1]);
+  };
+
+  const labelMatch =
+    tryMatch(/(?:role|job title|position|title)\s*(?:[:\-])\s*([^\n]+)/i) ||
+    tryMatch(/We are looking for an?\s+([^\n.,]+)/i);
+  if (labelMatch) return labelMatch;
+
+  const firstLineCandidate = (jd || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line && line.length < 80 && /[A-Za-z]/.test(line));
+  const cleanFirstLine = cleanTargetTitle(firstLineCandidate || "");
+  if (cleanFirstLine) return cleanFirstLine;
+
+  const cvLine = (cv || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => /seeking|targeting|aspiring/i.test(line));
+  const cleanCvLine = cleanTargetTitle(cvLine || "");
+  if (cleanCvLine) return cleanCvLine;
+
+  return "";
+}
+
+function pushSection(children, title, text, { treatBullets = true } = {}) {
+  if (!text) return;
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return;
+
+  children.push(label(title));
+
+  lines.forEach((line) => {
+    const bulletPrefix = line.match(/^[•\-]\s*/);
+    if (treatBullets && bulletPrefix) {
+      children.push(bullet(line.replace(bulletPrefix[0], "")));
+      return;
+    }
+
+    if (treatBullets && line.includes("•")) {
+      line
+        .split("•")
+        .map((chunk) => chunk.trim())
+        .filter(Boolean)
+        .forEach((chunk) => children.push(bullet(chunk)));
+      return;
+    }
+
+    children.push(para(line));
+  });
+}
+
 // ---------- main handler ----------
 export default async function handler(req, res) {
   // CORS
@@ -385,6 +497,7 @@ export default async function handler(req, res) {
   );
   res.setHeader("Access-Control-Max-Age", "86400");
   res.setHeader("Vary", "Origin");
+  res.setHeader("Cache-Control", "no-store");
 
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method === "GET") {
@@ -400,6 +513,7 @@ export default async function handler(req, res) {
     let jdText = "";
     let userEmail = "";
     let mode = "paste";
+    let providedTitle = "";
 
     if (contentType.includes("multipart/form-data")) {
       // ---------- UPLOAD ----------
@@ -462,6 +576,13 @@ export default async function handler(req, res) {
       cvText = await readUploadedFile(uploadedFile);
       jdText = S(fields.jd || fields.jobDescription);
       userEmail = S(fields.email);
+      providedTitle = S(
+        fields.jobTitle ||
+          fields.role ||
+          fields.targetRole ||
+          fields.targetTitle ||
+          fields.position
+      );
 
     } else {
       // ---------- PASTE ----------
@@ -472,6 +593,13 @@ export default async function handler(req, res) {
       jdText = S(body.jd || body.jobDescription);
       userEmail = S(body.email);
       mode = S(body.mode || "paste");
+      providedTitle = S(
+        body.jobTitle ||
+          body.role ||
+          body.targetRole ||
+          body.targetTitle ||
+          body.position
+      );
     }
 
     if (!cvText) {
@@ -487,6 +615,11 @@ export default async function handler(req, res) {
 
     // parse pasted cv
     const parsed = parsePastedCv(cvText);
+    const targetTitle = inferTargetTitle({
+      explicit: providedTitle,
+      jd: jdText,
+      cv: cvText,
+    });
 
     // AI parts
     const summaryFallback = parsed.summaryText || cvText.slice(0, 500);
@@ -498,7 +631,7 @@ export default async function handler(req, res) {
           rewriteSummary({
             currentSummary: summaryFallback,
             jd: jdText,
-            targetTitle: "",
+            targetTitle,
           }),
         { ms: 15000, label: "Summary rewrite" }
       ),
@@ -554,6 +687,18 @@ export default async function handler(req, res) {
     // name at centre
     children.push(centerHeading(parsed.fullName || "Candidate", 36, true));
 
+    if (targetTitle) {
+      children.push(
+        new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { after: 120 },
+          children: [
+            new TextRun({ text: targetTitle, italics: true, size: 24 }),
+          ],
+        })
+      );
+    }
+
     // contact line centre
     if (parsed.contactLine) {
       children.push(
@@ -574,46 +719,22 @@ export default async function handler(req, res) {
     children.push(para(skillsLine));
 
     // EXPERIENCE
-    children.push(label("PROFESSIONAL EXPERIENCE"));
-    alignedExp
-      .split("\n")
-      .filter((l) => l.trim().length > 0)
-      .forEach((line) => {
-        if (line.startsWith("•") || line.startsWith("-")) {
-          children.push(bullet(line.replace(/^[-•]\s?/, "").trim()));
-        } else {
-          children.push(para(line));
-        }
-      });
+    pushSection(children, "PROFESSIONAL EXPERIENCE", alignedExp);
 
     // EDUCATION
-    children.push(label("EDUCATION"));
-    eduBlock
-      .split("\n")
-      .filter((l) => l.trim().length > 0)
-      .forEach((line) => children.push(para(line)));
+    pushSection(children, "EDUCATION", eduBlock, { treatBullets: false });
 
-    if (projectBlock) {
-      children.push(label("PROJECTS"));
-      projectBlock
-        .split("\n")
-        .filter((l) => l.trim().length > 0)
-        .forEach((line) => {
-          if (line.startsWith("•") || line.startsWith("-")) {
-            children.push(bullet(line.replace(/^[-•]\s?/, "").trim()));
-          } else {
-            children.push(para(line));
-          }
-        });
-    }
+    pushSection(children, "PROJECTS", projectBlock);
 
-    if (certBlock) {
-      children.push(label("CERTIFICATIONS"));
-      certBlock
-        .split("\n")
-        .filter((l) => l.trim().length > 0)
-        .forEach((line) => children.push(para(line)));
-    }
+    pushSection(children, "CERTIFICATIONS", certBlock, { treatBullets: false });
+    pushSection(children, "VOLUNTEER EXPERIENCE", parsed.volunteerText);
+    pushSection(children, "AWARDS", parsed.awardsText, { treatBullets: false });
+    pushSection(children, "LANGUAGES", parsed.languagesText, {
+      treatBullets: false,
+    });
+    pushSection(children, "INTERESTS", parsed.interestsText, {
+      treatBullets: false,
+    });
 
     const doc = new Document({
       sections: [
