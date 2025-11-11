@@ -3,6 +3,7 @@
 
 import {
   AlignmentType,
+  BorderStyle,
   Document,
   Packer,
   Paragraph,
@@ -111,21 +112,127 @@ function getOpenAIClient() {
 }
 
 // ---------- docx helpers ----------
-const centerHeading = (txt, size = 32, bold = true) =>
+const BODY_FONT = "Calibri";
+const BODY_SIZE = 22;
+const HEADING_COLOR = "1F2933";
+const ACCENT_COLOR = "4B5563";
+const DIVIDER_COLOR = "D1D5DB";
+
+const createRun = (text, overrides = {}) =>
+  new TextRun({
+    text,
+    font: BODY_FONT,
+    size: BODY_SIZE,
+    color: HEADING_COLOR,
+    ...overrides,
+  });
+
+const centerHeading = (txt, size = 56, bold = true) =>
   new Paragraph({
     alignment: AlignmentType.CENTER,
     spacing: { after: 80 },
-    children: [new TextRun({ text: txt, bold, size })],
+    children: [createRun(txt, { bold, size })],
   });
 
 const label = (txt) =>
   new Paragraph({
-    spacing: { before: 240, after: 120 },
-    children: [new TextRun({ text: txt, bold: true })],
+    spacing: { before: 320, after: 160 },
+    border: {
+      bottom: {
+        color: DIVIDER_COLOR,
+        space: 4,
+        size: 12,
+        value: BorderStyle.SINGLE,
+      },
+    },
+    children: [
+      createRun(txt, { bold: true, allCaps: true, color: HEADING_COLOR }),
+    ],
   });
 
-const para = (txt) => new Paragraph({ children: [new TextRun(txt)] });
-const bullet = (txt) => new Paragraph({ text: txt, bullet: { level: 0 } });
+const para = (txt, { alignment = AlignmentType.JUSTIFIED, spacing } = {}) =>
+  new Paragraph({
+    alignment,
+    spacing: spacing || { after: 120 },
+    children: [createRun(txt)],
+  });
+
+const bullet = (txt) =>
+  new Paragraph({
+    bullet: { level: 0 },
+    spacing: { after: 80 },
+    children: [createRun(txt)],
+  });
+
+const dividerParagraph = () =>
+  new Paragraph({
+    children: [createRun(" ", { size: 2, color: DIVIDER_COLOR })],
+    border: {
+      bottom: {
+        color: DIVIDER_COLOR,
+        space: 4,
+        size: 6,
+        value: BorderStyle.SINGLE,
+      },
+    },
+    spacing: { after: 200 },
+  });
+
+function buildContactParagraph(line = "") {
+  const segments = line
+    .split("•")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  if (segments.length === 0) {
+    const clean = line.trim();
+    if (!clean) return null;
+    return new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 160 },
+      children: [createRun(clean, { color: ACCENT_COLOR })],
+    });
+  }
+
+  const runs = [];
+  segments.forEach((segment, index) => {
+    if (index > 0) {
+      runs.push(createRun("  •  ", { bold: false, color: ACCENT_COLOR }));
+    }
+    runs.push(createRun(segment, { color: ACCENT_COLOR }));
+  });
+
+  return new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: { after: 160 },
+    children: runs,
+  });
+}
+
+function pushSkillLines(children, skillsLine = "") {
+  const skills = skillsLine
+    .split(/[•,]/)
+    .map((skill) => skill.trim())
+    .filter(Boolean);
+
+  if (skills.length === 0) {
+    if (skillsLine.trim()) {
+      children.push(para(skillsLine, { alignment: AlignmentType.LEFT }));
+    }
+    return;
+  }
+
+  const groupSize = skills.length > 12 ? 6 : 4;
+  for (let i = 0; i < skills.length; i += groupSize) {
+    const slice = skills.slice(i, i + groupSize).join("   •   ");
+    children.push(
+      new Paragraph({
+        alignment: AlignmentType.LEFT,
+        spacing: { after: 80 },
+        children: [createRun(slice, { color: HEADING_COLOR })],
+      })
+    );
+  }
+}
 
 function safeFilenameSegment(value) {
   return (value || "")
@@ -810,33 +917,68 @@ function inferTargetTitle({
   return "";
 }
 
+function looksLikeBullet(line) {
+  return /^[•\-]\s*/.test(line);
+}
+
+function splitBulletLine(line) {
+  const bulletPrefix = line.match(/^[•\-]\s*/);
+  if (bulletPrefix) {
+    return [line.replace(bulletPrefix[0], "")];
+  }
+  return line
+    .split("•")
+    .map((chunk) => chunk.trim())
+    .filter(Boolean);
+}
+
 function pushSection(children, title, text, { treatBullets = true } = {}) {
   if (!text) return;
-  const lines = text
-    .split("\n")
-    .map((line) => line.trim())
+
+  const blocks = text
+    .split(/\n\s*\n/)
+    .map((block) => block.trim())
     .filter(Boolean);
-  if (lines.length === 0) return;
+
+  if (blocks.length === 0) return;
 
   children.push(label(title));
 
-  lines.forEach((line) => {
-    const bulletPrefix = line.match(/^[•\-]\s*/);
-    if (treatBullets && bulletPrefix) {
-      children.push(bullet(line.replace(bulletPrefix[0], "")));
-      return;
-    }
+  blocks.forEach((block) => {
+    const lines = block
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length === 0) return;
 
-    if (treatBullets && line.includes("•")) {
-      line
-        .split("•")
-        .map((chunk) => chunk.trim())
-        .filter(Boolean)
-        .forEach((chunk) => children.push(bullet(chunk)));
-      return;
-    }
+    let firstParagraphPlaced = false;
 
-    children.push(para(line));
+    lines.forEach((line) => {
+      if (!line) return;
+
+      if (treatBullets && (looksLikeBullet(line) || line.includes("•"))) {
+        splitBulletLine(line).forEach((item) => {
+          if (item) {
+            children.push(bullet(item));
+          }
+        });
+        return;
+      }
+
+      const paragraphOptions = firstParagraphPlaced
+        ? {}
+        : { bold: true };
+
+      children.push(
+        new Paragraph({
+          spacing: { after: 100 },
+          alignment: AlignmentType.JUSTIFIED,
+          children: [createRun(line, paragraphOptions)],
+        })
+      );
+
+      firstParagraphPlaced = true;
+    });
   });
 }
 
@@ -1198,52 +1340,54 @@ export default async function handler(req, res) {
     if (responseFormat === "docx" || includeDocument) {
       const children = [];
 
-      children.push(centerHeading(contact.name, 36, true));
+      children.push(centerHeading(contact.name));
 
       if (targetTitle) {
         children.push(
           new Paragraph({
             alignment: AlignmentType.CENTER,
             spacing: { after: 120 },
-            children: [
-              new TextRun({ text: targetTitle, italics: true, size: 24 }),
-            ],
+            children: [createRun(targetTitle, { italics: true, size: 32 })],
           })
         );
       }
 
-      if (contact.contactLine) {
-        children.push(
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            spacing: { after: 200 },
-            children: [new TextRun(contact.contactLine)],
-          })
-        );
+      const contactPara = buildContactParagraph(contact.contactLine);
+      if (contactPara) {
+        children.push(contactPara);
       }
+
+      children.push(dividerParagraph());
 
       children.push(label("PROFILE SUMMARY"));
       children.push(para(aiSummary));
 
       children.push(label("KEY SKILLS"));
-      children.push(para(skillsLine));
+      pushSkillLines(children, skillsLine);
 
       if (roleInsights) {
         children.push(label("ROLE-READY INSIGHTS"));
         if (roleInsights.summary) {
-          children.push(para(roleInsights.summary));
+          children.push(
+            para(roleInsights.summary, { alignment: AlignmentType.LEFT })
+          );
         }
         if (roleInsights.matchedKeywords.length > 0) {
           children.push(
             para(
               `Strengths to spotlight: ${roleInsights.matchedKeywords
                 .slice(0, 5)
-                .join(", ")}.`
+                .join(", ")}.`,
+              { alignment: AlignmentType.LEFT }
             )
           );
         }
         if (roleInsights.missingKeywords.length > 0) {
-          children.push(para("Consider adding evidence for:"));
+          children.push(
+            para("Consider adding evidence for:", {
+              alignment: AlignmentType.LEFT,
+            })
+          );
           roleInsights.missingKeywords.slice(0, 5).forEach((keyword) => {
             children.push(bullet(keyword));
           });
@@ -1254,13 +1398,25 @@ export default async function handler(req, res) {
         children.push(label("OPPORTUNITY OUTREACH PACK"));
 
         if (outreachKit.elevatorPitch) {
-          children.push(para(`Elevator pitch: ${outreachKit.elevatorPitch}`));
+          children.push(
+            para(`Elevator pitch: ${outreachKit.elevatorPitch}`, {
+              alignment: AlignmentType.LEFT,
+            })
+          );
         }
         if (outreachKit.valueHook) {
-          children.push(para(`Value hook: ${outreachKit.valueHook}`));
+          children.push(
+            para(`Value hook: ${outreachKit.valueHook}`, {
+              alignment: AlignmentType.LEFT,
+            })
+          );
         }
         if (outreachKit.subjectLine) {
-          children.push(para(`Email subject: ${outreachKit.subjectLine}`));
+          children.push(
+            para(`Email subject: ${outreachKit.subjectLine}`, {
+              alignment: AlignmentType.LEFT,
+            })
+          );
         }
         if (outreachKit.linkedinMessage) {
           const linkedInLines = outreachKit.linkedinMessage
@@ -1268,8 +1424,12 @@ export default async function handler(req, res) {
             .map((line) => line.trim())
             .filter(Boolean);
           if (linkedInLines.length > 0) {
-            children.push(para("LinkedIn message:"));
-            linkedInLines.forEach((line) => children.push(para(line)));
+            children.push(
+              para("LinkedIn message:", { alignment: AlignmentType.LEFT })
+            );
+            linkedInLines.forEach((line) =>
+              children.push(para(line, { alignment: AlignmentType.LEFT }))
+            );
           }
         }
       }
@@ -1295,6 +1455,18 @@ export default async function handler(req, res) {
       });
 
       const doc = new Document({
+        styles: {
+          default: {
+            paragraph: {
+              spacing: { after: 120 },
+            },
+            run: {
+              font: BODY_FONT,
+              size: BODY_SIZE,
+              color: HEADING_COLOR,
+            },
+          },
+        },
         sections: [
           {
             properties: {
