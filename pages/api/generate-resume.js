@@ -665,6 +665,110 @@ async function buildSkills({ cvText, jd }) {
   return resp.choices[0].message.content.trim();
 }
 
+function defaultOutreachKit(targetTitle) {
+  const roleLabel = targetTitle ? `${targetTitle} role` : "your next opportunity";
+  return {
+    elevatorPitch: `I help teams deliver results by combining proven execution with adaptable collaboration for the ${roleLabel}.`,
+    subjectLine: `Potential fit for the ${roleLabel}`,
+    linkedinMessage:
+      `Hi there — I spotted the ${roleLabel} and would love to connect. I blend delivery focus with a people-first approach and can hit the ground running. Happy to share a tailored resume if helpful!`,
+    valueHook:
+      "Recent highlight: Led cross-functional improvements that boosted efficiency and stakeholder satisfaction.",
+  };
+}
+
+async function buildOutreachKit({ cvText, jd, targetTitle }) {
+  const fallbackBase = defaultOutreachKit(targetTitle);
+  const fallback = { ...fallbackBase, __source: "fallback" };
+  const client = getOpenAIClient();
+
+  if (!client) return fallback;
+
+  const trimmedCv = cvText.slice(0, 2600);
+  const trimmedJd = jd.slice(0, 2000);
+
+  const prompt = [
+    "You're crafting a standout outreach kit for a candidate.",
+    "Blend credibility with warmth. UK tone. First person.",
+    targetTitle
+      ? `The target role is: ${targetTitle}.`
+      : "No explicit role provided; stay adaptable but confident.",
+    "",
+    "CV excerpt:",
+    `"""${trimmedCv}"""`,
+    "",
+    "Job description excerpt:",
+    `"""${trimmedJd}"""`,
+    "",
+    "Return an outreach kit that helps the candidate message a hiring manager without repeating long paragraphs.",
+  ].join("\n");
+
+  try {
+    const resp = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.45,
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "outreach_pack",
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "elevatorPitch",
+              "subjectLine",
+              "linkedinMessage",
+              "valueHook",
+            ],
+            properties: {
+              elevatorPitch: {
+                type: "string",
+                description:
+                  "2-sentence personal pitch weaving in differentiators and the target role.",
+              },
+              subjectLine: {
+                type: "string",
+                description: "Concise subject line for an outreach email (max 90 chars).",
+                maxLength: 90,
+              },
+              linkedinMessage: {
+                type: "string",
+                description: "3-4 sentence LinkedIn message formatted as a single block.",
+              },
+              valueHook: {
+                type: "string",
+                description:
+                  "One headline achievement or differentiator the candidate should mention.",
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const content = resp.choices?.[0]?.message?.content;
+    if (!content) return fallback;
+
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch (parseErr) {
+      console.warn("Outreach kit JSON parse failed", parseErr);
+      return fallback;
+    }
+
+    return {
+      ...fallbackBase,
+      ...parsed,
+      __source: "ai",
+    };
+  } catch (err) {
+    console.warn("Outreach kit generation failed", err);
+    return fallback;
+  }
+}
+
 function cleanTargetTitle(value = "") {
   return value.replace(/\s+/g, " ").replace(/[.,;:]+$/, "").trim();
 }
@@ -926,9 +1030,18 @@ export default async function handler(req, res) {
     // AI parts
     const summaryFallback = parsed.summaryText || cvText.slice(0, 500);
     const experienceFallback = parsed.expText || cvText;
+    const outreachFallback = {
+      ...defaultOutreachKit(targetTitle),
+      __source: "fallback",
+    };
 
     const timings = {};
-    const [summaryResult, experienceResult, skillsResult] = await Promise.allSettled([
+    const [
+      summaryResult,
+      experienceResult,
+      skillsResult,
+      outreachResult,
+    ] = await Promise.allSettled([
       timedRun({
         key: "summaryMs",
         timeoutLabel: "Summary rewrite",
@@ -959,6 +1072,13 @@ export default async function handler(req, res) {
         task: () => buildSkills({ cvText, jd: jdText }),
         timings,
       }),
+      timedRun({
+        key: "outreachMs",
+        timeoutLabel: "Outreach kit",
+        timeoutMs: 12000,
+        task: () => buildOutreachKit({ cvText, jd: jdText, targetTitle }),
+        timings,
+      }),
     ]);
 
     if (summaryResult.status === "rejected") {
@@ -969,6 +1089,9 @@ export default async function handler(req, res) {
     }
     if (skillsResult.status === "rejected") {
       console.warn("Skills AI failed", skillsResult.reason);
+    }
+    if (outreachResult.status === "rejected") {
+      console.warn("Outreach kit AI failed", outreachResult.reason);
     }
 
     const aiSummary =
@@ -986,6 +1109,18 @@ export default async function handler(req, res) {
         ? skillsResult.value
         : "Customer Service • Stakeholder Management • Time Management • Problem Solving";
 
+    const outreachInternal =
+      outreachResult.status === "fulfilled" && outreachResult.value
+        ? outreachResult.value
+        : outreachFallback;
+
+    const { __source: outreachInternalSource, ...outreachKit } = outreachInternal;
+
+    const outreachSource =
+      outreachResult.status === "fulfilled" && outreachInternalSource === "ai"
+        ? "ai"
+        : "fallback";
+
     const roleInsights = deriveKeywordInsights({ cvText, jdText });
 
     const meta = {
@@ -995,6 +1130,7 @@ export default async function handler(req, res) {
       experienceSource:
         experienceResult.status === "fulfilled" ? "ai" : "fallback",
       skillsSource: skillsResult.status === "fulfilled" ? "ai" : "fallback",
+      outreachSource,
       emailProvided: Boolean(userEmail),
       responseFormat,
       includeDocument,
@@ -1035,6 +1171,7 @@ export default async function handler(req, res) {
       professionalDevelopment: parsed.developmentText || "",
       languages: parsed.languagesText || "",
       interests: parsed.interestsText || "",
+      outreachKit,
     };
 
     if (roleInsights) {
@@ -1113,6 +1250,30 @@ export default async function handler(req, res) {
         }
       }
 
+      if (outreachKit) {
+        children.push(label("OPPORTUNITY OUTREACH PACK"));
+
+        if (outreachKit.elevatorPitch) {
+          children.push(para(`Elevator pitch: ${outreachKit.elevatorPitch}`));
+        }
+        if (outreachKit.valueHook) {
+          children.push(para(`Value hook: ${outreachKit.valueHook}`));
+        }
+        if (outreachKit.subjectLine) {
+          children.push(para(`Email subject: ${outreachKit.subjectLine}`));
+        }
+        if (outreachKit.linkedinMessage) {
+          const linkedInLines = outreachKit.linkedinMessage
+            .split(/\n+/)
+            .map((line) => line.trim())
+            .filter(Boolean);
+          if (linkedInLines.length > 0) {
+            children.push(para("LinkedIn message:"));
+            linkedInLines.forEach((line) => children.push(para(line)));
+          }
+        }
+      }
+
       pushSection(children, "PROFESSIONAL EXPERIENCE", alignedExp);
 
       pushSection(children, "EDUCATION", eduBlock, { treatBullets: false });
@@ -1157,6 +1318,8 @@ export default async function handler(req, res) {
         contact,
         sections,
       };
+
+      payload.outreachKit = outreachKit;
 
       if (roleInsights) {
         payload.insights = roleInsights;
