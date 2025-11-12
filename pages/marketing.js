@@ -1,5 +1,5 @@
 import { MarketingLanding } from '../components/MarketingLanding';
 
-export default function Home() {
+export default function Marketing() {
   return <MarketingLanding />;
 }
